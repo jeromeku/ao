@@ -310,7 +310,7 @@ def _mixed_mm_kernel(
             scale_offset_k = k * BLOCK_K * SPLIT_K * stride_scale_k // QGROUP_SIZE
         else:
             #Since we are iterating across rows of B, k offset does not change in transposed case
-            scale_offset_k = BLOCK_N * stride_scale_k // QGROUP_SIZE
+            scale_offset_k = pid_n * BLOCK_N * stride_scale_k // QGROUP_SIZE
         #     scale_offset_k = k * BLOCK_K * SPLIT_K * stride_scale_k + tl.arange(0, BLOCK_K) * stride_scale_k
         
         scales = tl.load(scales_ptr + offsets_scale_n + scale_offset_k)

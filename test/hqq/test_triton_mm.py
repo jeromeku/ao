@@ -182,5 +182,5 @@ if __name__ == "__main__":
     shape = [16, 16, 16]
     BLOCK_M, BLOCK_N, BLOCK_K = shape
     group_size = BLOCK_K
-    _test_mixed_mm(shape, group_size=group_size, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, transposed=False)
+    # _test_mixed_mm(shape, group_size=group_size, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, transposed=False)
     _test_mixed_mm(shape, group_size=group_size, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, transposed=True)
