@@ -3,7 +3,6 @@ import triton.language as tl
 from triton import cdiv
 
 from .kernels import (
-    mixed_mm_debug,
     mixed_mm_kernel_compute_bound,
     mixed_mm_kernel_max_autotune,
 )
@@ -50,6 +49,25 @@ def triton_mixed_mm(
     BLOCK_N=None,
     BLOCK_K=None,
 ):
+    """Run fused int4 / fp16 dequant GEMM
+
+    Args:
+        a (torch.Tensor): M x K if not transposed, M x N if transposed
+        b (torch.Tensor): (K // 2) x N, packed such that 2 int4's are packed into 1 uint8 (see pack_2xint4)
+        scales (torch.Tensor): (num_groups x N), where num_groups = (N * K / group_size)
+        zeros (torch.Tensor): same shape as scales
+        group_size (torch.Tensor): size of group in groupwise quantization -- MUST be along axis 1 of an N x K matrix
+        transposed (bool, optional): Whether to run a transposed matmul where shapes are (M x N) x (K x N) => (M x K)
+        acc_dtype (_type_, optional): dtype of accumulator. Defaults to None, which corresponds to tl.float32.
+        input_precision (str, optional): Only relevant when dtype of a is torch.float32. Defaults to "ieee".
+        kernel_type (str, optional): Type of autoconfig to use. Either "max_autotune" or "compute_bound".
+        BLOCK_M (int, optional): Only for debugging. Defaults to None.
+        BLOCK_N (int, optional): Only for debugging. Defaults to None.
+        BLOCK_K (int, optional): Only for debugging. Defaults to None.
+
+    Returns:
+        c (torch.Tensor): M x N
+    """
     device = a.device
     # handle non-contiguous inputs if necessary
     if a.stride(0) > 1 and a.stride(1) > 1:
@@ -57,16 +75,17 @@ def triton_mixed_mm(
     if b.stride(0) > 1 and b.stride(1) > 1:
         b = b.contiguous()
     # checks constraints
-    # assert a.shape[1] == b.shape[0] * 2, "incompatible dimensions"
+    if not transposed:
+        assert a.shape[1] == b.shape[0] * 2, "incompatible dimensions"
+
     assert b.dtype == torch.int8 or b.dtype == torch.uint8, "b must be int8 or uint8"
     assert scales.ndim == 2
-    # assert kernel_type in ["max_autotune", "compute_bound"]
     if transposed:
         assert (
             a.shape[1] == b.shape[1]
         ), "transpose requires (M x N) x (K x N), where reduction dim is N"
+
     M, K = a.shape
-    # _, N = b.shape
     N = b.shape[1] if not transposed else b.shape[0] * 2
     # assert scales.shape[1] == N if not transposed else scales.shape[0] == N
     # assert scales.shape[0] == K // group_size if not transposed else scales.shape[1] == K // group_size
@@ -89,7 +108,9 @@ def triton_mixed_mm(
     elif kernel_type == "compute_bound":
         kernel = mixed_mm_kernel_compute_bound
     else:
-        kernel = mixed_mm_debug
+        from .kernels import _mixed_mm_debug
+
+        kernel = _mixed_mm_debug
 
     if kernel_type == "max_autotune" or kernel_type == "compute_bound":
         kernel[grid](

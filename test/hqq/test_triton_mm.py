@@ -3,7 +3,7 @@ import pytest
 from termcolor import colored
 
 try:
-    # import hqq
+    import hqq
     import triton
 
     if int(triton.__version__.split(".")[0]) < 3:
