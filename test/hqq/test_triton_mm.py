@@ -261,14 +261,14 @@ if __name__ == "__main__":
     BLOCK_K = K // 2
     BLOCK_N = N // 2
     group_size = BLOCK_K
-    # _test_mixed_mm(
-    #     shape,
-    #     group_size=group_size,
-    #     BLOCK_M=BLOCK_M,
-    #     BLOCK_N=BLOCK_N,
-    #     BLOCK_K=BLOCK_K,
-    #     transposed=False,
-    # )
+    _test_mixed_mm(
+        shape,
+        group_size=group_size,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        transposed=False,
+    )
     _test_mixed_mm(
         shape,
         group_size=group_size,
