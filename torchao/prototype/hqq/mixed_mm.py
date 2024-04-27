@@ -1,7 +1,7 @@
 import torch
 from triton import cdiv
 import triton.language as tl
-from .kernels import mixed_mm_kernel_compute_bound, mixed_mm_kernel_max_autotune
+from .kernels import mixed_mm_kernel_compute_bound, mixed_mm_kernel_max_autotune, mixed_mm_debug
 
 #h/t jlebar for the bit packing / unpacking logic (source: Triton Slack thread)
 #https://gist.github.com/jlebar/3435b2c00deea53258887ce37231e5e2
@@ -38,6 +38,10 @@ def triton_mixed_mm(
     input_precision="ieee",
     fp8_fast_accum=False,
     kernel_type="compute_bound",
+    # For debugging only
+    BLOCK_M = None,
+    BLOCK_N = None,
+    BLOCK_K = None,
 ):
     device = a.device
     # handle non-contiguous inputs if necessary
@@ -49,8 +53,9 @@ def triton_mixed_mm(
     assert a.shape[1] == b.shape[0] * 2, "incompatible dimensions"
     assert b.dtype == torch.int8 or b.dtype == torch.uint8, "b must be int8 or uint8"
     assert scales.ndim == 2
-    assert kernel_type in ["max_autotune", "compute_bound"]
-    
+    # assert kernel_type in ["max_autotune", "compute_bound"]
+    if transposed:
+        assert a.shape[1] == b.shape[1], "transpose requires (M x N) x (K x N), where reduction dim is N"
     M, K = a.shape
     _, N = b.shape
     # N = b.shape[1] if not transposed else b.shape[0]
@@ -72,10 +77,39 @@ def triton_mixed_mm(
 
     if kernel_type == "max_autotune":
         kernel = mixed_mm_kernel_max_autotune
-    else:
+    elif kernel_type == "compute_bound":
         kernel = mixed_mm_kernel_compute_bound
-        
-    kernel[grid](
+    else:
+        kernel = mixed_mm_debug
+    
+    if kernel_type == "max_autotune" or kernel_type == "compute_bound":
+        kernel[grid](
+                a,
+                b,
+                scales,
+                zeros,
+                c,
+                M,
+                N,
+                K,  #
+                a.stride(0),
+                a.stride(1),  #
+                b.stride(0),
+                b.stride(1),  #
+                c.stride(0),
+                c.stride(1),
+                scales.stride(0),
+                scales.stride(1),
+                TRANSPOSED=transposed,
+                IS_BFLOAT16=a.dtype == torch.bfloat16,
+                QGROUP_SIZE=group_size,
+                acc_dtype=acc_dtype,
+                input_precision=input_precision,
+                fp8_fast_accum=fp8_fast_accum,
+            )
+    else:
+        assert all([BLOCK_M is not None, BLOCK_N is not None, BLOCK_K is not None])
+        kernel[grid](
             a,
             b,
             scales,
@@ -92,6 +126,10 @@ def triton_mixed_mm(
             c.stride(1),
             scales.stride(0),
             scales.stride(1),
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            SPLIT_K=1,
             TRANSPOSED=transposed,
             IS_BFLOAT16=a.dtype == torch.bfloat16,
             QGROUP_SIZE=group_size,
@@ -99,4 +137,5 @@ def triton_mixed_mm(
             input_precision=input_precision,
             fp8_fast_accum=fp8_fast_accum,
         )
+
     return c
