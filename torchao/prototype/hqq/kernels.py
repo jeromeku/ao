@@ -192,6 +192,7 @@ def _mixed_mm_kernel(
     acc_dtype: tl.constexpr = tl.float32,
     input_precision: tl.constexpr = "ieee",
     fp8_fast_accum: tl.constexpr = False,
+    DEBUG: tl.constexpr = False,
 ):
     """Mixed matmul kernel
 
@@ -240,7 +241,10 @@ def _mixed_mm_kernel(
     pid_n = (pid % width) // group_size
 
     rm = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
-    ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
+    if not DEBUG:
+        ram = tl.max_contiguous(tl.multiple_of(rm % M, BLOCK_M), BLOCK_M)
+    else:
+        ram = rm
     # rn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
     # rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
     rak = pid_z * BLOCK_K + tl.arange(0, BLOCK_K)
@@ -248,13 +252,19 @@ def _mixed_mm_kernel(
     # BLOCK_K for b is effectively BLOCK_K // 2
     if not TRANSPOSED:
         rn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
-        rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)        # rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
+        if not DEBUG:
+            rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)        # rbn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_N), BLOCK_N)
+        else:
+            rbn = rn
         rbk = pid_z * BLOCK_K // 2 + tl.arange(0, BLOCK_K // 2)
     else:
         rn = (pid_n * BLOCK_N // 2 + tl.arange(0, BLOCK_N // 2)) % N
-        rbn = tl.max_contiguous(tl.multiple_of(rn % (N // 2), BLOCK_N // 2), BLOCK_N // 2)
+        if not DEBUG:
+            rbn = tl.max_contiguous(tl.multiple_of(rn % (N // 2), BLOCK_N // 2), BLOCK_N // 2)
+        else:
+            rbn = rn
         rbk = rak
-        
+    
     A = A + (ram[:, None] * stride_am + rak[None, :] * stride_ak)
     
     if not TRANSPOSED:
@@ -383,4 +393,4 @@ def _mixed_mm_kernel(
 _mixed_mm = triton.heuristics(MIXED_MM_HEURISTICS)(_mixed_mm_kernel)
 mixed_mm_kernel_max_autotune = triton.autotune(configs=get_configs_compute_bound() + get_configs_io_bound(), key=["M", "N", "K"])(_mixed_mm)
 mixed_mm_kernel_compute_bound = triton.autotune(configs=get_configs_compute_bound(), key=["M", "N", "K"])(_mixed_mm)
-mixed_mm_debug = _mixed_mm
+mixed_mm_debug = _mixed_mm_kernel

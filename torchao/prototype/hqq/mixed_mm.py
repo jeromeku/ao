@@ -109,6 +109,7 @@ def triton_mixed_mm(
             )
     else:
         assert all([BLOCK_M is not None, BLOCK_N is not None, BLOCK_K is not None])
+        grid = (M // BLOCK_M * N // BLOCK_N, 1, 1)
         kernel[grid](
             a,
             b,
@@ -130,12 +131,14 @@ def triton_mixed_mm(
             BLOCK_N=BLOCK_N,
             BLOCK_K=BLOCK_K,
             SPLIT_K=1,
+            EVEN_K=True,
             TRANSPOSED=transposed,
             IS_BFLOAT16=a.dtype == torch.bfloat16,
             QGROUP_SIZE=group_size,
             acc_dtype=acc_dtype,
             input_precision=input_precision,
             fp8_fast_accum=fp8_fast_accum,
+            DEBUG=True,
         )
 
     return c
