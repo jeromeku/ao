@@ -31,8 +31,8 @@ setup(
     package_data={
         "torchao.kernel.configs": ["*.pkl"],
     },
-    install_requires=read_requirements("requirements.txt"),
-    extras_require={"dev": read_requirements("dev-requirements.txt")},
+    # install_requires=read_requirements("requirements.txt"),
+    # extras_require={"dev": read_requirements("dev-requirements.txt")},
     description="Package for applying ao techniques to GPU models",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",

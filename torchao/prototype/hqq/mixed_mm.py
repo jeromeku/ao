@@ -1,10 +1,16 @@
 import torch
-from triton import cdiv
 import triton.language as tl
-from .kernels import mixed_mm_kernel_compute_bound, mixed_mm_kernel_max_autotune, mixed_mm_debug
+from triton import cdiv
 
-#h/t jlebar for the bit packing / unpacking logic (source: Triton Slack thread)
-#https://gist.github.com/jlebar/3435b2c00deea53258887ce37231e5e2
+from .kernels import (
+    mixed_mm_debug,
+    mixed_mm_kernel_compute_bound,
+    mixed_mm_kernel_max_autotune,
+)
+
+
+# h/t jlebar for the bit packing / unpacking logic (source: Triton Slack thread)
+# https://gist.github.com/jlebar/3435b2c00deea53258887ce37231e5e2
 def pack_2xint4(t):
     """
     The packing format is such that consecutive rows are packed into a lower / upper bits
@@ -27,6 +33,7 @@ def pack_2xint4(t):
     t = t.reshape(t.shape[0] // 2, 2, t.shape[1]).permute(1, 0, 2)
     return (t[0] & 0xF) | (t[1] << 4)
 
+
 def triton_mixed_mm(
     a,
     b,
@@ -39,9 +46,9 @@ def triton_mixed_mm(
     fp8_fast_accum=False,
     kernel_type="compute_bound",
     # For debugging only
-    BLOCK_M = None,
-    BLOCK_N = None,
-    BLOCK_K = None,
+    BLOCK_M=None,
+    BLOCK_N=None,
+    BLOCK_K=None,
 ):
     device = a.device
     # handle non-contiguous inputs if necessary
@@ -50,15 +57,17 @@ def triton_mixed_mm(
     if b.stride(0) > 1 and b.stride(1) > 1:
         b = b.contiguous()
     # checks constraints
-    assert a.shape[1] == b.shape[0] * 2, "incompatible dimensions"
+    # assert a.shape[1] == b.shape[0] * 2, "incompatible dimensions"
     assert b.dtype == torch.int8 or b.dtype == torch.uint8, "b must be int8 or uint8"
     assert scales.ndim == 2
     # assert kernel_type in ["max_autotune", "compute_bound"]
     if transposed:
-        assert a.shape[1] == b.shape[1], "transpose requires (M x N) x (K x N), where reduction dim is N"
+        assert (
+            a.shape[1] == b.shape[1]
+        ), "transpose requires (M x N) x (K x N), where reduction dim is N"
     M, K = a.shape
-    _, N = b.shape
-    # N = b.shape[1] if not transposed else b.shape[0]
+    # _, N = b.shape
+    N = b.shape[1] if not transposed else b.shape[0] * 2
     # assert scales.shape[1] == N if not transposed else scales.shape[0] == N
     # assert scales.shape[0] == K // group_size if not transposed else scales.shape[1] == K // group_size
     assert scales.dtype == a.dtype
@@ -81,32 +90,32 @@ def triton_mixed_mm(
         kernel = mixed_mm_kernel_compute_bound
     else:
         kernel = mixed_mm_debug
-    
+
     if kernel_type == "max_autotune" or kernel_type == "compute_bound":
         kernel[grid](
-                a,
-                b,
-                scales,
-                zeros,
-                c,
-                M,
-                N,
-                K,  #
-                a.stride(0),
-                a.stride(1),  #
-                b.stride(0),
-                b.stride(1),  #
-                c.stride(0),
-                c.stride(1),
-                scales.stride(0),
-                scales.stride(1),
-                TRANSPOSED=transposed,
-                IS_BFLOAT16=a.dtype == torch.bfloat16,
-                QGROUP_SIZE=group_size,
-                acc_dtype=acc_dtype,
-                input_precision=input_precision,
-                fp8_fast_accum=fp8_fast_accum,
-            )
+            a,
+            b,
+            scales,
+            zeros,
+            c,
+            M,
+            N,
+            K,  #
+            a.stride(0),
+            a.stride(1),  #
+            b.stride(0),
+            b.stride(1),  #
+            c.stride(0),
+            c.stride(1),
+            scales.stride(0),
+            scales.stride(1),
+            TRANSPOSED=transposed,
+            IS_BFLOAT16=a.dtype == torch.bfloat16,
+            QGROUP_SIZE=group_size,
+            acc_dtype=acc_dtype,
+            input_precision=input_precision,
+            fp8_fast_accum=fp8_fast_accum,
+        )
     else:
         assert all([BLOCK_M is not None, BLOCK_N is not None, BLOCK_K is not None])
         grid = (M // BLOCK_M * N // BLOCK_N, 1, 1)
