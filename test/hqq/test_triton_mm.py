@@ -132,11 +132,15 @@ def _test_mixed_mm(shape, group_size, BLOCK_M, BLOCK_N, BLOCK_K, axis=1, dtype=t
     # W_dq = hqq_linear.dequantize()
     W_q = torch.arange(K*N, dtype=quant_dtype, device="cuda").reshape(N, K) % 2 ** 4
     # print(W_q)
-    
-    scales, zeros = meta["scale"], meta["zero"]
-    scales = scales.reshape(N, -1)
-    zeros = zeros.reshape(N, -1)
+    scales = torch.arange(N * K // group_size, dtype=dtype, device="cuda").reshape(N, -1)
+    zeros = torch.zeros_like(scales)
+    # scales, zeros = meta["scale"], meta["zero"]
+    # scales = scales.reshape(N, -1)
+    # zeros = zeros.reshape(N, -1)
     W_dq = (W_q - zeros) * scales
+    print("W_q: ", W_q.T)
+    print(f"zeros: {zeros.T}")
+    print(f"scales: {scales.T}")
     
     packed_w = pack_2xint4(W_q.T)
 
@@ -178,5 +182,5 @@ if __name__ == "__main__":
     shape = [16, 16, 16]
     BLOCK_M, BLOCK_N, BLOCK_K = shape
     group_size = BLOCK_K
-    # _test_mixed_mm(shape, group_size=group_size, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, transposed=False)
+    _test_mixed_mm(shape, group_size=group_size, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, transposed=False)
     _test_mixed_mm(shape, group_size=group_size, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, transposed=True)
