@@ -1,7 +1,11 @@
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
 import bitsandbytes as bnb
 import torch
+from torch._inductor.utils import do_bench_using_profiling
 
-from torchao.dtypes.nf4tensor import to_nf4
+from torchao.dtypes.nf4tensor import linear_nf4, to_nf4
 
 
 def _build_input_weight(embed_dim: int, device: torch.device, dtype: torch.dtype):
@@ -22,7 +26,8 @@ def _build_bnb_linear(input_weight, device):
     bnb_linear.to(device)
     return bnb_linear
 
-def main(dtype: torch.dtype = torch.bfloat16):
+
+def check_bnb_linear(dtype: torch.dtype = torch.bfloat16):
     torch.manual_seed(0)
     device = "cuda"
     embed_dim = 512
@@ -40,5 +45,29 @@ def main(dtype: torch.dtype = torch.bfloat16):
     assert nugs_diff < 1
     assert (nugs_diff - bnb_diff).abs() < 2e-1
 
+def bench_bnb_linear(input, weight):
+    bnb_linear = _build_bnb_linear(weight, device="cuda")
+    return do_bench_using_profiling(lambda: bnb_linear(input))
+
+def bench_linear_nf4(input, weight, compile=False, **compile_kwargs):
+    nf4_weight = to_nf4(weight)
+    if compile:
+        linear_fn = torch.compile(linear_nf4, **compile_kwargs)
+    else:
+        linear_fn = linear_nf4
+    return do_bench_using_profiling(lambda: linear_fn(input, nf4_weight))
+
+def benchmark_bnb_linear(input_dim: int, embed_dim: int, dtype: torch.dtype = torch.bfloat16):
+    input_weight = _build_input_weight(embed_dim, device="cuda", dtype=dtype)
+    x = torch.randn(input_dim, embed_dim, dtype=dtype, device="cuda")
+
+    # bnb_linear_time = bench_bnb_linear(x, input_weight)
+    # print(f"bnb linear time: {bnb_linear_time} ms")
+    nf4_linear_time = bench_linear_nf4(x, input_weight)
+    print(f"nf4 linear time: {nf4_linear_time} ms")
+    nf4_linear_time_compiled = bench_linear_nf4(x, input_weight, compile=True)
+    print(f"nf4 linear time (compiled): {nf4_linear_time_compiled} ms")
+
 if __name__ == "__main__":
-    main()
+    input_dim, embed_dim = 2, 512
+    benchmark_bnb_linear(input_dim, embed_dim)
