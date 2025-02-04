@@ -7,6 +7,8 @@ from torch._inductor.utils import do_bench_using_profiling
 
 from torchao.dtypes.nf4tensor import linear_nf4, to_nf4
 
+DEFAULT_DTYPE = torch.bfloat16
+DEVICE = "cuda"
 
 def _build_input_weight(embed_dim: int, device: torch.device, dtype: torch.dtype):
     torch.manual_seed(0)
@@ -68,6 +70,21 @@ def benchmark_bnb_linear(input_dim: int, embed_dim: int, dtype: torch.dtype = to
     nf4_linear_time_compiled = bench_linear_nf4(x, input_weight, compile=True)
     print(f"nf4 linear time (compiled): {nf4_linear_time_compiled} ms")
 
+def trace_compiled_linear_nf4(input, weight, **compile_kwargs):
+    linear_fn = torch.compile(linear_nf4, **compile_kwargs)
+    breakpoint()
+    weight = to_nf4(weight)
+    return linear_fn(input, weight)
+
+def make_input(input_dim: int, embed_dim: int, device: torch.device=DEVICE, dtype: torch.dtype=DEFAULT_DTYPE):
+    input_weight = torch.randn(input_dim, embed_dim, device=device, dtype=dtype)
+    
+    return input_weight
+def make_weight(embed_dim: int, device: torch.device=DEVICE, dtype: torch.dtype=DEFAULT_DTYPE):
+    return torch.randn(embed_dim, embed_dim, device=device, dtype=dtype)
+
 if __name__ == "__main__":
     input_dim, embed_dim = 2, 512
-    benchmark_bnb_linear(input_dim, embed_dim)
+    input = make_input(input_dim, embed_dim)
+    weight = make_weight(embed_dim)
+    trace_compiled_linear_nf4(input, weight)
