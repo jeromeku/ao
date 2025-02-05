@@ -1,5 +1,6 @@
 import functools
 import math
+import os
 import sys
 from dataclasses import dataclass, replace
 from enum import Enum, auto
@@ -815,7 +816,7 @@ class NF4Tensor(torch.Tensor):
         # All ops in the  NF4_OPS_TABLE expect NF4 Tensors as inputs
         # And don't support mixed tensor subclasses. This will trigger the handler for
         # the next type in the dispatch list
-
+        #breakpoint()
         def allowed_subclasses(type):
             return (
                 issubclass(cls, type)
@@ -828,6 +829,7 @@ class NF4Tensor(torch.Tensor):
         if not all(allowed_subclasses(t) for t in types):
             return NotImplemented("Up to the next one to handle")
 
+        if os.environ.get("DEBUG_MODE", False): breakpoint()
         if func in NF4_OPS_TABLE:
             return NF4_OPS_TABLE[func](func, args, kwargs)
         raise NotImplementedError(
@@ -838,9 +840,11 @@ class NF4Tensor(torch.Tensor):
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
+        #breakpoint()
         if kwargs is None:
             kwargs = {}
 
+        if os.environ.get("DEBUG_MODE", False): breakpoint()
         try:
             if func in NF4_TORCH_FUNCTIONS:
                 return NF4_TORCH_FUNCTIONS[func](*args, **kwargs)

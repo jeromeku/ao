@@ -1,6 +1,7 @@
+import io
 import logging
+from collections import OrderedDict
 
-logging.basicConfig(level=logging.DEBUG)
 import bitsandbytes as bnb
 import torch
 from torch._inductor.utils import do_bench_using_profiling
@@ -76,6 +77,19 @@ def trace_compiled_linear_nf4(input, weight, **compile_kwargs):
     weight = to_nf4(weight)
     return linear_fn(input, weight)
 
+def check_dispatch(bs=1, in_features=1024, out_features=512, compile=False, backend="aot_eager"):
+    input = torch.randn(bs, in_features, device="cuda")
+    model = torch.nn.Linear(in_features, out_features, bias=False).to("cuda")
+    breakpoint()
+    model.weight = torch.nn.Parameter(to_nf4(model.weight), requires_grad=False)
+    breakpoint()
+    
+    if compile:
+        model = torch.compile(model, backend=backend)
+    
+    out = model(input)
+    
+
 def make_input(input_dim: int, embed_dim: int, device: torch.device=DEVICE, dtype: torch.dtype=DEFAULT_DTYPE):
     input_weight = torch.randn(input_dim, embed_dim, device=device, dtype=dtype)
     
@@ -83,8 +97,35 @@ def make_input(input_dim: int, embed_dim: int, device: torch.device=DEVICE, dtyp
 def make_weight(embed_dim: int, device: torch.device=DEVICE, dtype: torch.dtype=DEFAULT_DTYPE):
     return torch.randn(embed_dim, embed_dim, device=device, dtype=dtype)
 
+def save_state_dict_to_buffer(self, state_dict: OrderedDict):
+    buffer = io.BytesIO()
+    torch.save(state_dict, buffer)
+    buffer.seek(0)
+    return buffer
+
+class TestMod(torch.nn.Module):
+    def __init__(self, tensor, block_size, scaler_block_size):
+        super().__init__()
+        self.param = torch.nn.Parameter(
+            to_nf4(tensor, block_size, scaler_block_size)
+        )
+
+def test_state_dict(hidden_dim: int, block_size: int, scaler_block_size: int):
+    """Tests loading to and from different module state dicts"""
+    input_tensor = torch.rand(hidden_dim, dtype=DEFAULT_DTYPE)
+    base_mod = TestMod(input_tensor, block_size, scaler_block_size)
+    breakpoint()
+    state_dict = base_mod.state_dict()
+    #saved_state_dict = save_state_dict_to_buffer(state_dict)
+
+    # other_mod = TestMod(input_tensor, block_size, scaler_block_size)
+    # other_mod.load_state_dict(torch.load(saved_state_dict))
+    
 if __name__ == "__main__":
-    input_dim, embed_dim = 2, 512
-    input = make_input(input_dim, embed_dim)
-    weight = make_weight(embed_dim)
-    trace_compiled_linear_nf4(input, weight)
+    # input_dim, embed_dim = 2, 512
+    # input = make_input(input_dim, embed_dim)
+    # weight = make_weight(embed_dim)
+    # # trace_compiled_linear_nf4(input, weight)
+    # test_state_dict(64, 32, 2)
+    print(torch.compiler.list_backends(exclude_tags=None))
+    check_dispatch(bs=1, in_features=1024, out_features=512, compile=True, backend="aot_eager")
