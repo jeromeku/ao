@@ -98,7 +98,12 @@ def make_batch(global_bs, dim, dtype, device):
 
 def test_ddp(global_bs, dim, num_linears, device, dtype, num_steps, save_dir, compile):
     model = _init_model(dim, num_linears, device, dtype)
-    model = DDP(model, device_ids=[device])
+    # Calculate total model size in bytes
+    total_model_size = sum(p.numel() * p.element_size() for p in model.parameters())
+    total_model_size_mb = total_model_size / (1024 * 1024)
+    bucket_size = total_model_size_mb // 2
+    model = DDP(model, device_ids=[device], bucket_cap_mb=bucket_size)
+    
     if compile:
         model = torch.compile(model)
     optim = torch.optim.Adam(model.parameters(), lr=1e-2)
