@@ -75,25 +75,29 @@ def make_batch(bs, dim, dtype, device):
     return batch
 
 def test_ddp(bs=2, dim=128, num_steps=3, device="cuda", dtype=torch.float32):
-    rank = dist.get_rank()
     model = _init_model(dim, device, dtype)
     model = DDP(model, device_ids=[device])
     optim = torch.optim.Adam(model.parameters(), lr=1e-2)
-    torch.manual_seed(rank + 1)
+    torch.manual_seed(42)
+    
     losses = []
     
     for i in range(num_steps):
         inp = make_batch(bs, dim, dtype, device)
         loss = model(inp).sum()
         losses.append(loss)
-        dist_print(f"LOSS::STEP_{i}", loss.item())
+        #dist_print(f"LOSS::STEP_{i}", loss.item())
         loss.backward()
 #        _print_params_and_grads(model, f"AFTER_BACKWARDS_{i}")
         optim.step()
-        _print_params_and_grads(model, f"PARAMS_AND_GRADS::AFTER_STEP_{i}")
+        #_print_params_and_grads(model, f"PARAMS_AND_GRADS::AFTER_STEP_{i}")
         optim.zero_grad()
         #_print_params_and_grads(model, f"AFTER_ZERO_GRAD_{i}")
-        dist.barrier()
+        #dist.barrier()
+
+    save_path = f"ddp-{dist.get_world_size()}-{dist.get_rank()}.pt"
+    torch.save(model.state_dict(), save_path)
+    dist_print("Saved model to", save_path)
 
 def init_dist():
     dist.init_process_group(backend="nccl")
