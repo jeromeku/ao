@@ -1,5 +1,5 @@
-import copy
 import math
+import os
 import time
 from contextlib import contextmanager
 
@@ -11,6 +11,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torchao.dtypes.nf4tensor import NF4Tensor, linear_nf4, to_nf4
 
 NUM_LINEARS = 1
+SEED = 42
 class LoRALinear(nn.Module):
     def __init__(
         self,
@@ -37,6 +38,7 @@ class LoRALinear(nn.Module):
         nn.init.kaiming_uniform_(self.lora_b.weight, a=math.sqrt(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        torch.manual_seed(SEED)
         out = linear_nf4(input=x, weight=self.weight)
         lora_out = self.lora_a(x)
         lora_out = (self.lora_alpha / self.lora_rank) * self.lora_b(lora_out)
@@ -44,7 +46,6 @@ class LoRALinear(nn.Module):
 
 def _init_model(dim=128, device="cuda", dtype=torch.float32) -> nn.Module:
     with torch.device(device):
-        torch.manual_seed(42)
 
         modules = []
         for i in range(NUM_LINEARS):
@@ -68,6 +69,7 @@ def _print_params_and_grads(model, prefix=""):
             dist_print(f"{prefix}::DEBUG::GRAD", name, type(param), param.sum().item(), param.grad.sum().item())
         else:
             dist_print(f"{prefix}::DEBUG::PARAM", name, type(param), param.sum().item(), "None")
+
 def make_batch(bs, dim, dtype, device):
     batch = torch.randn((bs, dim), dtype=dtype, device=device)
     if dist.get_world_size() > 1:
@@ -78,7 +80,6 @@ def test_ddp(bs=2, dim=128, num_steps=3, device="cuda", dtype=torch.float32):
     model = _init_model(dim, device, dtype)
     model = DDP(model, device_ids=[device])
     optim = torch.optim.Adam(model.parameters(), lr=1e-2)
-    torch.manual_seed(42)
     
     losses = []
     
@@ -95,7 +96,16 @@ def test_ddp(bs=2, dim=128, num_steps=3, device="cuda", dtype=torch.float32):
         #_print_params_and_grads(model, f"AFTER_ZERO_GRAD_{i}")
         #dist.barrier()
 
-    save_path = f"ddp-{dist.get_world_size()}-{dist.get_rank()}.pt"
+    dist.barrier()
+    if dist.get_world_size() == 1:
+        save_dir = "checkpoints/ref"
+    else:
+        save_dir = f"checkpoints/test"
+    if dist.get_rank() == 0:
+        os.makedirs(save_dir, exist_ok=True)
+    dist.barrier()
+
+    save_path = f"{save_dir}/ddp-{dist.get_rank()}.pt"
     torch.save(model.state_dict(), save_path)
     dist_print("Saved model to", save_path)
 
@@ -118,4 +128,5 @@ def distributed_context():
 
 if __name__ == "__main__":
     with distributed_context():
+        torch.manual_seed(SEED)
         test_ddp()

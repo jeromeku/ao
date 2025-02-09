@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
-CHECKPOINT_DIR=checkpoints
-REF_CHECKPOINT=$CHECKPOINT_DIR/ref/ddp-1-0.pt
-TEST_CHECKPOINT_DIR=$CHECKPOINT_DIR/test
+CHECKPOINT_DIR=${1:-checkpoints}
+REF_CHECKPOINT=$CHECKPOINT_DIR/ref/ddp-0.pt
+TEST_CHECKPOINT_DIR=${2:-checkpoints/test}
 
 # Check REF_CHECKPOINT exists
 if [ ! -f $REF_CHECKPOINT ]; then

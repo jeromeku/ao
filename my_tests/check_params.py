@@ -13,10 +13,10 @@ if __name__ == "__main__":
 
     ref_state_dict = torch.load(args.ref_checkpoint, weights_only=True, map_location="cpu")
 
-    print(f"Ref checkpoint: {Path(args.ref_checkpoint).stem}")
+    print(f"Ref checkpoint: {args.ref_checkpoint}")
 
     for path in Path(args.checkpoints_dir).glob("*.pt"):
-        print(f"Checking {path.stem}")
+        print(f"Checking {path}")
         state_dict = torch.load(path, weights_only=True, map_location="cpu")
         assert ref_state_dict.keys() == state_dict.keys()
         for name in ref_state_dict.keys():
