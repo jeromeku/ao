@@ -68,6 +68,11 @@ def _print_params_and_grads(model, prefix=""):
             dist_print(f"{prefix}::DEBUG::GRAD", name, type(param), param.sum().item(), param.grad.sum().item())
         else:
             dist_print(f"{prefix}::DEBUG::PARAM", name, type(param), param.sum().item(), "None")
+def make_batch(bs, dim, dtype, device):
+    batch = torch.randn((bs, dim), dtype=dtype, device=device)
+    if dist.get_world_size() > 1:
+        batch = batch.chunk(dist.get_world_size(), dim=0)[dist.get_rank()]
+    return batch
 
 def test_ddp(bs=2, dim=128, num_steps=3, device="cuda", dtype=torch.float32):
     rank = dist.get_rank()
@@ -78,14 +83,14 @@ def test_ddp(bs=2, dim=128, num_steps=3, device="cuda", dtype=torch.float32):
     losses = []
     
     for i in range(num_steps):
-        inp = torch.randn((bs, dim), device=device, dtype=dtype)
+        inp = make_batch(bs, dim, dtype, device)
         loss = model(inp).sum()
         losses.append(loss)
-        dist_print(f"STEP_{i}", loss.item())
+        dist_print(f"LOSS::STEP_{i}", loss.item())
         loss.backward()
-        _print_params_and_grads(model, f"AFTER_BACKWARDS_{i}")
+#        _print_params_and_grads(model, f"AFTER_BACKWARDS_{i}")
         optim.step()
-        _print_params_and_grads(model, f"AFTER_STEP_{i}")
+        _print_params_and_grads(model, f"PARAMS_AND_GRADS::AFTER_STEP_{i}")
         optim.zero_grad()
         #_print_params_and_grads(model, f"AFTER_ZERO_GRAD_{i}")
         dist.barrier()
