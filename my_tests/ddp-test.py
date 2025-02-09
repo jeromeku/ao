@@ -175,6 +175,9 @@ if __name__ == "__main__":
     args.dtype = getattr(torch, args.dtype)
     dynamo_config.optimize_ddp = args.optimize_ddp
 
+    if args.optimize_ddp == "python_reducer":
+        dynamo_config.compiled_autograd= True
+
     with distributed_context():
         torch.manual_seed(args.seed)
         test_ddp(
