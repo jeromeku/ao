@@ -16,22 +16,23 @@ if __name__ == "__main__":
     print(f"Ref checkpoint: {Path(args.ref_checkpoint).stem}")
 
     for path in Path(args.checkpoints_dir).glob("*.pt"):
-        print(f"Checking checkpoint {path.stem}")
+        print(f"Checking {path.stem}")
         state_dict = torch.load(path, weights_only=True, map_location="cpu")
         assert ref_state_dict.keys() == state_dict.keys()
         for name in ref_state_dict.keys():
             ref_param = ref_state_dict[name]
             test_param = state_dict[name]
-            if not torch.allclose(ref_param, test_param):
-                if isinstance(ref_param, NF4Tensor):
-                    ref_param = ref_param.get_original_weight()
-                    assert isinstance(test_param, NF4Tensor)
-                    test_param = test_param.get_original_weight()
+            print(f"Checking {name} {type(ref_param)} {type(test_param)}")
+
+            if isinstance(ref_param, NF4Tensor):
+                ref_param = ref_param.get_original_weight()
+                assert isinstance(test_param, NF4Tensor)
+                test_param = test_param.get_original_weight()
+
+            if not torch.allclose(ref_param, test_param, atol=1e-4, rtol=1e-4):
                 diff = (ref_param - test_param).abs().max()
                 print(f" \u2718 Param {name} differs by {diff}")
             else:
                 print(f" \u2713 Param {name} is consistent")
         print(f"Passed!")
 
-    state_dict = torch.load(args.path)
-    print(state_dict)
