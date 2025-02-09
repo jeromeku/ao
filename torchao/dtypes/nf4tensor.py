@@ -423,37 +423,37 @@ def nf4_pin_memory(aten_op, args, kwargs=None):
     updated_attrs = apply_to_inner_tensors(nf4tensor, aten_op, args[1:], kwargs)
     return NF4Tensor(*construct_nf4_args(nf4tensor, updated_attrs))
 
-@implements(
-    [
-        aten.cat.default,
-    ]
-)
-def nf4_cat(aten_op: torch._ops.OpOverload, args, kwargs=None):
+# @implements(
+#     [
+#         aten.cat.default,
+#     ]
+# )
+# def nf4_cat(aten_op: torch._ops.OpOverload, args, kwargs=None):
     
-    tensors_to_cat = args[0]
-    assert all(isinstance(t, torch.Tensor) for t in tensors_to_cat)
-    remaining_args = args[1:]
+#     tensors_to_cat = args[0]
+#     assert all(isinstance(t, torch.Tensor) for t in tensors_to_cat)
+#     remaining_args = args[1:]
    
-    rank = torch.distributed.get_rank()
-    print(f"DEBUG::NF4_cat:: rank{rank} {len(tensors_to_cat)}")
-    print(f"DEBUG::NF4_cat:: rank{rank} {remaining_args}")
-    print(f"DEBUG::NF4_cat:: rank{rank} {kwargs}")
+#     rank = torch.distributed.get_rank()
+#     print(f"DEBUG::NF4_cat:: rank{rank} {len(tensors_to_cat)}")
+#     print(f"DEBUG::NF4_cat:: rank{rank} {remaining_args}")
+#     print(f"DEBUG::NF4_cat:: rank{rank} {kwargs}")
 
-    ts = []
-    for t in tensors_to_cat:
-        assert isinstance(t, torch.Tensor)
-        print(f"DEBUG::NF4_cat:: rank{rank} {type(t)} {t.shape}")
+#     ts = []
+#     for t in tensors_to_cat:
+#         assert isinstance(t, torch.Tensor)
+#         print(f"DEBUG::NF4_cat:: rank{rank} {type(t)} {t.shape}")
 
-        if isinstance(t, NF4Tensor):
-            ts.append(t.get_original_weight())
-        else:
-            ts.append(t)
+#         if isinstance(t, NF4Tensor):
+#             ts.append(t.get_original_weight())
+#         else:
+#             ts.append(t)
     
-    if kwargs is None:
-        kwargs = {}
+#     if kwargs is None:
+#         kwargs = {}
     
-    tensors = aten_op(ts, *remaining_args, **kwargs)
-    return tensors
+#     tensors = aten_op(ts, *remaining_args, **kwargs)
+#     return tensors
 
 @dataclass(frozen=True)
 class SubclassTensorArgs:

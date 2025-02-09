@@ -96,39 +96,36 @@ def make_batch(global_bs, dim, dtype, device):
     return batch
 
 
+def get_params_to_ignore(model):
+    params_to_ignore = []
+    for name, param in model.named_parameters():
+        if isinstance(param, NF4Tensor):
+            params_to_ignore.append(name)
+    return params_to_ignore
+
 def test_ddp(global_bs, dim, num_linears, device, dtype, num_steps, save_dir, compile):
     model = _init_model(dim, num_linears, device, dtype)
-    # Calculate total model size in bytes
-    total_model_size = sum(p.numel() * p.element_size() for p in model.parameters())
-    total_model_size_mb = total_model_size / (1024 * 1024)
-    bucket_size = total_model_size_mb // 2
-    model = DDP(model, device_ids=[device], bucket_cap_mb=bucket_size)
+    params_to_ignore = get_params_to_ignore(model)
+    DDP._set_params_and_buffers_to_ignore_for_model(model, params_to_ignore)
     
-    if compile:
-        model = torch.compile(model)
+    model = DDP(model, device_ids=[device])
     optim = torch.optim.Adam(model.parameters(), lr=1e-2)
 
+    if compile:
+        model = torch.compile(model)
+   
     losses = []
 
     for i in range(num_steps):
         inp = make_batch(global_bs, dim, dtype, device)
         loss = model(inp).sum()
         losses.append(loss)
-        # dist_print(f"LOSS::STEP_{i}", loss.item())
         loss.backward()
-        #        _print_params_and_grads(model, f"AFTER_BACKWARDS_{i}")
         optim.step()
-        # _print_params_and_grads(model, f"PARAMS_AND_GRADS::AFTER_STEP_{i}")
         optim.zero_grad()
-        # _print_params_and_grads(model, f"AFTER_ZERO_GRAD_{i}")
-        # dist.barrier()
-
+   
     dist.barrier()
-    # ddp_logging_data = model._get_ddp_logging_data()
-    # if dist.get_rank() == 0:
-    #     pprint(f"DDP_LOGGING_DATA::{ddp_logging_data}")
-    # dist.barrier()
-
+   
     if dist.get_world_size() == 1:
         save_dir = f"{save_dir}/ref"
     else:
