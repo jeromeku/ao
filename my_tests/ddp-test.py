@@ -75,7 +75,7 @@ def make_batch(global_bs, dim, dtype, device):
         batch = batch.chunk(dist.get_world_size(), dim=0)[dist.get_rank()]
     return batch
 
-def test_ddp(global_bs, dim, num_linears, device, dtype, num_steps):
+def test_ddp(global_bs, dim, num_linears, device, dtype, num_steps, save_dir):
     model = _init_model(dim, num_linears, device, dtype)
     model = DDP(model, device_ids=[device])
     optim = torch.optim.Adam(model.parameters(), lr=1e-2)
@@ -97,9 +97,9 @@ def test_ddp(global_bs, dim, num_linears, device, dtype, num_steps):
 
     dist.barrier()
     if dist.get_world_size() == 1:
-        save_dir = "checkpoints/ref"
+        save_dir = f"{save_dir}/ref"
     else:
-        save_dir = f"checkpoints/test"
+        save_dir = f"{save_dir}/test"
     if dist.get_rank() == 0:
         os.makedirs(save_dir, exist_ok=True)
     dist.barrier()
@@ -135,8 +135,9 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--dtype", type=str, default="float32")
     parser.add_argument("--num_steps", type=int, default=3)
+    parser.add_argument("--save_dir", type=str, default="checkpoints")
     args = parser.parse_args()
 
     with distributed_context():
         torch.manual_seed(args.seed)
-        test_ddp(args.global_bs, args.dim, args.num_linears, args.device, args.dtype, args.num_steps)
+        test_ddp(args.global_bs, args.dim, args.num_linears, args.device, args.dtype, args.num_steps, args.save_dir)

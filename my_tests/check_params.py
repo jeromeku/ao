@@ -7,15 +7,18 @@ from torchao.dtypes.nf4tensor import NF4Tensor
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ref_checkpoint", type=str, required=True)
-    parser.add_argument("--checkpoints_dir", type=str, required=True)
+    parser.add_argument("--ref_checkpoint_dir", type=str, required=True)
+    parser.add_argument("--test_checkpoints_dir", type=str, required=True)
+
     args = parser.parse_args()
 
-    ref_state_dict = torch.load(args.ref_checkpoint, weights_only=True, map_location="cpu")
+    ref_checkpoints = list(Path(args.ref_checkpoint_dir).glob("*.pt"))
+    assert len(ref_checkpoints) == 1, "Expected exactly one reference checkpoint"
+    ref_checkpoint = ref_checkpoints[0]
+    ref_state_dict = torch.load(ref_checkpoint, weights_only=True, map_location="cpu")
+    print(f"Ref checkpoint: {ref_checkpoint}")
 
-    print(f"Ref checkpoint: {args.ref_checkpoint}")
-
-    for path in Path(args.checkpoints_dir).glob("*.pt"):
+    for path in Path(args.test_checkpoints_dir).glob("*.pt"):
         print(f"Checking {path}")
         state_dict = torch.load(path, weights_only=True, map_location="cpu")
         assert ref_state_dict.keys() == state_dict.keys()
