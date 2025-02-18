@@ -1,5 +1,7 @@
 import bitsandbytes as bnb
 import torch
+import triton
+import triton.language as tl
 from bitsandbytes.functional import (
     create_dynamic_map,
     dequantize_blockwise,
@@ -99,4 +101,54 @@ def test_bnb_dequant():
     print(ref_dq.shape, ref_dq.dtype, ref_dq.view(-1)[:5])
     print(dq.shape, dq.dtype, dq.view(-1)[:5])
     
-test_bnb_dequant()
+
+
+@triton.jit
+def lookup_code(q, code_ptr):
+    q = q.to(tl.int32)
+    return tl.load(code_ptr + q)
+
+@triton.jit
+def lookup_kernel(q_ptr, code_ptr, out_ptr, BLOCK_X: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    n_blocks = tl.num_programs(axis=0)
+
+    load_idx = pid * BLOCK_X + tl.arange(0, BLOCK_X)
+    qs = tl.load(q_ptr + load_idx)
+    out = lookup_code(qs, code_ptr)
+    tl.store(out_ptr + load_idx, out)
+ 
+def test_triton_lookup():
+    torch.manual_seed(SEED)
+    dim = 512
+    device = "cuda"
+    dtype = torch.bfloat16
+    input_weight = create_input_weight(dim, device, dtype)
+
+    block_code = create_dynamic_map().to(device)
+    param = bnb.nn.Params4bit(
+        input_weight, requires_grad=False, quant_type="nf4"
+    ).cuda()
+    qstate = param.quant_state
+    nested_qstate = param.quant_state.state2
+
+    quantized_data = param
+    quantized_scalers = qstate.absmax
+    nested_scale_factors = nested_qstate.absmax
+    quantized_scaler_mean = qstate.offset
+
+    decoded = lookup_scaler_code(quantized_scalers, block_code)
+    print(decoded.shape, decoded.dtype, decoded.view(-1)[:5])
+
+    out = torch.empty_like(decoded)
+    total_elements = quantized_scalers.numel()
+    BLOCK_X = total_elements
+    grid = (triton.cdiv(total_elements, BLOCK_X),)
+
+    lookup_kernel[grid](quantized_scalers, block_code, out, BLOCK_X=BLOCK_X)
+    print(out.shape, out.dtype, out.view(-1)[:5])
+    if not torch.allclose(out, decoded):
+        diff = (out - decoded).abs().max()
+        print(f"diff: {diff}")
+
+test_triton_lookup()
