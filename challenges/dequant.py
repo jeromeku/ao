@@ -4,6 +4,8 @@ import bitsandbytes as bnb
 import torch
 import triton
 import triton.language as tl
+
+#import unsloth
 from bitsandbytes.functional import (
     create_dynamic_map,
     dequantize_blockwise,
@@ -11,6 +13,11 @@ from bitsandbytes.functional import (
 )
 
 from torchao.dtypes.nf4tensor import to_nf4
+
+#from unsloth.kernels.utils import fast_dequantize
+
+
+DEVICE = "cuda"
 
 BLOCK_SIZE = 64
 NESTED_BLOCK_SIZE = 256
@@ -160,16 +167,19 @@ def torch_to_triton_dtype(dtype):
     tt_dtype = getattr(tl, dtype_str)
     return tt_dtype
 
-def test_triton_dequant(dtype, qblocks_per_cta):
+def create_qparam(input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True):
+    param = bnb.nn.Params4bit(
+        input_weight, requires_grad=False, quant_type=quant_type, quant_storage=quant_storage, compress_statistics=compress_statistics
+    ).cuda()
+    return param
+
+def test_triton_dequant(shape, dtype, qblocks_per_cta, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True):
     torch.manual_seed(SEED)
-    dim = 64 * 16
     device = "cuda"
 
-    input_weight = torch.randn(dim, dim, device=device, dtype=dtype)
-    
-    param = bnb.nn.Params4bit(
-        input_weight, requires_grad=False, quant_type="nf4"
-    ).cuda()
+    input_weight = torch.randn(shape, device=device, dtype=dtype)
+    param = create_qparam(input_weight, quant_type=quant_type, quant_storage=quant_storage, compress_statistics=compress_statistics)
+
     qstate = param.quant_state
     nested_qstate = param.quant_state.state2
 
@@ -238,12 +248,46 @@ def test_triton_dequant(dtype, qblocks_per_cta):
         # Insert unicode checkmark
         print(f"\u2713 Dequantization passed for qblocks_per_cta {qblocks_per_cta}\n")
 
+def test_fast_dequant(shape, dtype, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True):
+    from unsloth.kernels.utils import fast_dequantize
+    input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
+    qparam = create_qparam(input_weight, quant_type=quant_type, quant_storage=quant_storage, compress_statistics=compress_statistics)
+    dq = fast_dequantize(input_weight)
+    dq_ref = dequantize_nf4(qparam, quant_state=qparam.quant_state)
+    print("dq", torch.allclose(dq, dq_ref))
+
+# def benchmark_dequant(shape, dtype):
+#     input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
+#     fast_dequantize(input_weight, qstate)
+
+def triton_dequant_nf4(qparam: bnb.nn.Params4bit, qblocks_per_cta=1):
+    qstate = qparam.quant_state
+    nested_qstate = qparam.quant_state.state2
+
+    quantized_data = qparam.data
+    quantized_scalers = qstate.absmax
+    nested_scale_factors = nested_qstate.absmax
+    quantized_scaler_mean = qstate.offset
+
+    nf4_code = qstate.code
+    block_code = qstate.state2.code
+    breakpoint()
+
 if __name__ == "__main__":
+    torch.manual_seed(SEED)
+    
     MAX_BLOCKS_PER_CTA = int(math.log2(NESTED_BLOCK_SIZE))
-    q_blocks_per_cta = [2 ** p for p in range(0, MAX_BLOCKS_PER_CTA + 1)]
-    for dtype in [torch.bfloat16, torch.float16]:
-        for qblocks_per_cta in q_blocks_per_cta:
-            test_triton_dequant(dtype, qblocks_per_cta)
+    shape = (512, 512) # (4096, 4096), (4096, 14336)
+    dtype = torch.bfloat16
+    qblocks_per_cta = 1
+    input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
+    qparam = create_qparam(input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True)
+    triton_dequant_nf4(qparam=qparam, qblocks_per_cta=qblocks_per_cta)
+    # test_fast_dequant(shape=shape, dtype=dtype)
+    # q_blocks_per_cta = [2 ** p for p in range(0, MAX_BLOCKS_PER_CTA + 1)]
+    # for dtype in [torch.bfloat16, torch.float16]:
+    #     for qblocks_per_cta in q_blocks_per_cta:
+    #         test_triton_dequant(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta)
 
 #TODO
 # optimizations: max_contiguous, eviction policies, static on-device LUT using tuple see (https://github.com/triton-lang/triton/issues/5864)
