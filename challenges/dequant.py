@@ -1,4 +1,5 @@
 import math
+from argparse import ArgumentParser
 
 import bitsandbytes as bnb
 import torch
@@ -6,15 +7,9 @@ import triton
 import triton.language as tl
 
 #import unsloth
-from bitsandbytes.functional import (
-    create_dynamic_map,
-    dequantize_blockwise,
-    dequantize_nf4,
-)
+from bitsandbytes.functional import dequantize_nf4
 from triton.testing import do_bench
 from unsloth.kernels.utils import fast_dequantize
-
-from torchao.dtypes.nf4tensor import to_nf4
 
 DEVICE = "cuda"
 
@@ -22,7 +17,6 @@ BLOCK_SIZE = 64
 NESTED_BLOCK_SIZE = 256
 SEED = 0
 
-#TODO: tune num_warps, num_ctas
 def get_dequant_configs(min_blocks_per_cta=1, max_blocks_per_cta=16):
     configs = []
     powers_of_two = [2 ** p for p in range(int(math.log2(min_blocks_per_cta)), int(math.log2(max_blocks_per_cta)) + 1)]
@@ -218,17 +212,19 @@ TOLERANCE = {
 }
 if __name__ == "__main__":
     torch.manual_seed(SEED)
-
-    TEST = False 
-    BENCHMARK = True
+    parser = ArgumentParser()
+    parser.add_argument("--test", action="store_true")
+    parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--shape", type=int, nargs="+", default=[4096, 14336])
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "float16", "bfloat16"])
+    args = parser.parse_args()
     
-    SHAPES = [(4096, 4096), (4096, 14336), (14336, 4096)]
-    dtype = torch.bfloat16
+    dtype = getattr(torch, args.dtype)
     atol, rtol = TOLERANCE[dtype]
     qblocks_per_cta = 8
-    shape = SHAPES[1]
+    shape = tuple(args.shape)
     
-    if TEST:
+    if args.test:
         MAX_BLOCKS_PER_CTA = int(math.log2(NESTED_BLOCK_SIZE))
     
         for qblocks_per_cta in [2 ** p for p in range(0, MAX_BLOCKS_PER_CTA + 1)]:
@@ -242,13 +238,5 @@ if __name__ == "__main__":
                 raise AssertionError(f"triton kernel equivalence failed at shape {shape}, autotuned")
             print("-" * 100)
 
-    if BENCHMARK:
+    if args.benchmark:
         benchmark_dequant(shape=shape, dtype=dtype, autotune=True)
-    # test_fast_dequant(shape=shape, dtype=dtype)
-    # q_blocks_per_cta = [2 ** p for p in range(0, MAX_BLOCKS_PER_CTA + 1)]
-    # for dtype in [torch.bfloat16, torch.float16]:
-    #     for qblocks_per_cta in q_blocks_per_cta:
-    #         test_triton_dequant(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta)
-
-#TODO
-# optimizations: max_contiguous, eviction policies, static on-device LUT using tuple see (https://github.com/triton-lang/triton/issues/5864)
