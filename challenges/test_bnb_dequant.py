@@ -181,6 +181,7 @@ def dequant_nf4_kernel(
     dq_ptr,
     # For debugging only
     dqabsmax_ptr,
+    dqabsmax_scalers_ptr,
     # Quantized data block size
     QBLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
     # Nested block size
@@ -206,11 +207,19 @@ def dequant_nf4_kernel(
 
     # Load qabsmax
     qabsmax_elements_to_load: tl.constexpr = QBLOCKS_PER_CTA
-    qabsmax_load_idx = block_idx * qabsmax_elements_to_load + tl.arange(0, qabsmax_elements_to_load)
+    qabsmax_offset = block_idx * qabsmax_elements_to_load
+    qabsmax_load_idx = qabsmax_offset + tl.arange(0, qabsmax_elements_to_load)
     qabsmax = tl.load(qabsmax_ptr + qabsmax_load_idx)
     dqabsmax = lookup_code(qabsmax, block_code_ptr)
-    # Store and load indices are the same
     tl.store(dqabsmax_ptr + qabsmax_load_idx, dqabsmax)
+
+    qabsmax_scalers_offset = qabsmax_offset // NESTED_QBLOCK_SIZE
+    NUM_QABSMAX_SCALERS: tl.constexpr = (QBLOCKS_PER_CTA + NESTED_QBLOCK_SIZE - 1) // NESTED_QBLOCK_SIZE
+    qabsmax_scalers_load_idx = qabsmax_scalers_offset + tl.arange(0, NUM_QABSMAX_SCALERS)
+    dqabsmax_scalers = tl.load(qabsmax_scalers_ptr + qabsmax_scalers_load_idx)
+    
+    # Store and load indices are the same
+    tl.store(dqabsmax_scalers_ptr + qabsmax_scalers_load_idx, dqabsmax_scalers)
 
 
 def create_nf4_code(device):
@@ -253,6 +262,7 @@ def test_triton_dequant():
 
     ref_dqabsmax = lookup_scaler_code(quantized_scalers, block_code)
     dqabsmax = torch.empty_like(ref_dqabsmax)
+    dqabsmax_scalers = torch.empty_like(nested_scale_factors)
 
     qblocks_per_cta = 8
     dequant_nf4_kernel[grid](
@@ -264,12 +274,14 @@ def test_triton_dequant():
         block_code_ptr=block_code, 
         dq_ptr=dq,
         dqabsmax_ptr=dqabsmax,
+        dqabsmax_scalers_ptr=dqabsmax_scalers,
         QBLOCK_SIZE=BLOCK_SIZE, 
         NESTED_QBLOCK_SIZE=NESTED_BLOCK_SIZE,
         QBLOCKS_PER_CTA=qblocks_per_cta)
 
     print("dqabsmax", torch.allclose(dqabsmax, ref_dqabsmax))
     print("dq", torch.allclose(dq, ref_interleaved))
+    print("dqabsmax_scalers", torch.allclose(dqabsmax_scalers, nested_scale_factors))
     # print(dq.view(-1)[:5], dq.view(-1)[-5:])
     # print(ref_interleaved.view(-1)[:5], ref_interleaved.view(-5:])
     # print(torch.allclose(dq, ref_interleaved))
