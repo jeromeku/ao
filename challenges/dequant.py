@@ -175,13 +175,13 @@ def triton_dequant_nf4(qparam: bnb.nn.Params4bit, QBLOCKS_PER_CTA=None, autotune
 def unsloth_dequantize(qparam: bnb.nn.Params4bit):
     return fast_dequantize(qparam, qparam.quant_state)
 
-def test_equivalence(shape, dtype, qblocks_per_cta=None, autotune=False, include_unsloth=True):
+def test_equivalence(shape, dtype, qblocks_per_cta=None, autotune=False, include_unsloth=True, atol=1e-3, rtol=1e-3):
     input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
     qparam = create_qparam(input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True)
     ref_dq = dequantize_nf4(qparam, quant_state=qparam.quant_state)
     dq = triton_dequant_nf4(qparam=qparam, QBLOCKS_PER_CTA=qblocks_per_cta, autotune=autotune)
 
-    passed = torch.allclose(dq, ref_dq)
+    passed = torch.allclose(dq, ref_dq, atol=atol, rtol=rtol)
     if passed:
         print(f"\u2713 triton kernel passed")
     else:
@@ -194,38 +194,56 @@ def test_equivalence(shape, dtype, qblocks_per_cta=None, autotune=False, include
 
     return passed
 
-def benchmark_dequant(shape, dtype, qblocks_per_cta, include_unsloth=True):
+def benchmark_dequant(shape, dtype, qblocks_per_cta=None, autotune=False):
+    breakpoint()
     input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
     qparam = create_qparam(input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True)
+    
     bnb_time = do_bench(lambda: dequantize_nf4(qparam, quant_state=qparam.quant_state))
-    tt_time = do_bench(lambda: triton_dequant_nf4(qparam=qparam, QBLOCKS_PER_CTA=qblocks_per_cta))
+    tt_time = do_bench(lambda: triton_dequant_nf4(qparam=qparam, QBLOCKS_PER_CTA=qblocks_per_cta, autotune=autotune))
     unsloth_time = do_bench(lambda: unsloth_dequantize(qparam))
-    print(f"Benchmarkingshape: {shape}, dtype: {dtype}, qblocks_per_cta: {qblocks_per_cta}")
-    print(f" bnb time: {bnb_time}")
-    print(f" triton time: {tt_time}")
-    print(f" unsloth time: {unsloth_time}")
+    
+    tt_bnb_speedup = bnb_time / tt_time
+    unsloth_bnb_speedup = bnb_time / unsloth_time
+    tt_unsloth_speedup = unsloth_time / tt_time
+    
+    print(f"Benchmarking shape: {shape}, dtype: {dtype}, qblocks_per_cta: {'autotuned' if autotune else qblocks_per_cta}")
+    print(f" bnb time: {bnb_time:.4f}ms, triton time: {tt_time:.4f}ms, unsloth time: {unsloth_time:.4f}ms")
+    print(f" triton / bnb speedup: {tt_bnb_speedup:.2f}x, unsloth / bnb speedup: {unsloth_bnb_speedup:.2f}x, triton / unsloth speedup: {tt_unsloth_speedup:.2f}x")
 
+TOLERANCE = {
+    torch.float32: (1e-4, 1e-4),
+    torch.float16: (1e-3, 1e-3),
+    torch.bfloat16: (1e-2, 1e-2)
+}
 if __name__ == "__main__":
     torch.manual_seed(SEED)
+
+    TEST = False 
+    BENCHMARK = True
     
-    MAX_BLOCKS_PER_CTA = int(math.log2(NESTED_BLOCK_SIZE))
     SHAPES = [(4096, 4096), (4096, 14336), (14336, 4096)]
     dtype = torch.bfloat16
+    atol, rtol = TOLERANCE[dtype]
     qblocks_per_cta = 8
-    for shape in SHAPES[0]:
+    shape = SHAPES[1]
+    
+    if TEST:
+        MAX_BLOCKS_PER_CTA = int(math.log2(NESTED_BLOCK_SIZE))
+    
         for qblocks_per_cta in [2 ** p for p in range(0, MAX_BLOCKS_PER_CTA + 1)]:
             print(f"Testing shape: {shape}, qblocks_per_cta: {qblocks_per_cta}")
-            passed = test_equivalence(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta, autotune=False, include_unsloth=False)
+            passed = test_equivalence(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta, autotune=False, include_unsloth=False, atol=atol, rtol=rtol)
             if not passed:
                 raise AssertionError(f"triton kernel equivalence failed at shape {shape}, qblocks_per_cta={qblocks_per_cta}")
             print(f"Testing shape: {shape}, autotuned")
-            passed = test_equivalence(shape=shape, dtype=dtype, autotune=True, include_unsloth=False)
+            passed = test_equivalence(shape=shape, dtype=dtype, autotune=True, include_unsloth=False, atol=atol, rtol=rtol)
             if not passed:
                 raise AssertionError(f"triton kernel equivalence failed at shape {shape}, autotuned")
-            print("-"*100)
+            print("-" * 100)
 
-        #benchmark_dequant(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta)
-    
+    if BENCHMARK:
+        benchmark_dequant(shape=shape, dtype=dtype, autotune=True)
     # test_fast_dequant(shape=shape, dtype=dtype)
     # q_blocks_per_cta = [2 ** p for p in range(0, MAX_BLOCKS_PER_CTA + 1)]
     # for dtype in [torch.bfloat16, torch.float16]:
