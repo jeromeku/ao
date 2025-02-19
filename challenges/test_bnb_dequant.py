@@ -109,6 +109,40 @@ def lookup_code(q, code_ptr):
     q = q.to(tl.int32)
     return tl.load(code_ptr + q)
 
+def test_triton_lookup():
+    torch.manual_seed(SEED)
+    dim = 512
+    device = "cuda"
+    dtype = torch.bfloat16
+    input_weight = create_input_weight(dim, device, dtype)
+
+    block_code = create_dynamic_map().to(device)
+    param = bnb.nn.Params4bit(
+        input_weight, requires_grad=False, quant_type="nf4"
+    ).cuda()
+    qstate = param.quant_state
+    nested_qstate = param.quant_state.state2
+
+    quantized_data = param
+    quantized_scalers = qstate.absmax
+    nested_scale_factors = nested_qstate.absmax
+    quantized_scaler_mean = qstate.offset
+
+    decoded = lookup_scaler_code(quantized_scalers, block_code)
+    print(decoded.shape, decoded.dtype, decoded.view(-1)[:5])
+
+    out = torch.empty_like(decoded)
+    total_elements = quantized_scalers.numel()
+    BLOCK_X = total_elements
+    grid = (triton.cdiv(total_elements, BLOCK_X),)
+
+    lookup_kernel[grid](quantized_scalers, block_code, out, BLOCK_X=BLOCK_X)
+    print(out.shape, out.dtype, out.view(-1)[:5])
+    if not torch.allclose(out, decoded):
+        diff = (out - decoded).abs().max()
+        print(f"diff: {diff}")
+
+
 @triton.jit
 def lookup_kernel(q_ptr, code_ptr, out_ptr, BLOCK_X: tl.constexpr):
     pid = tl.program_id(axis=0)
@@ -151,6 +185,7 @@ def dequant_nf4_kernel(
     NESTED_QBLOCK_SIZE: tl.constexpr = NESTED_BLOCK_SIZE,
     QBLOCKS_PER_CTA: tl.constexpr = 1):
     
+    tl.static_print("grid size", tl.num_programs(axis=0))
     output_elements_per_qblock: tl.constexpr = QBLOCKS_PER_CTA * QBLOCK_SIZE
     input_elements_per_qblock: tl.constexpr = output_elements_per_qblock // 2
 
@@ -166,39 +201,6 @@ def dequant_nf4_kernel(
     interleaved = tl.interleave(dq_first_elements, dq_second_elements)
     store_idx = block_idx * output_elements_per_qblock + tl.arange(0, output_elements_per_qblock)
     tl.store(dq_ptr + store_idx, interleaved)
-
-def test_triton_lookup():
-    torch.manual_seed(SEED)
-    dim = 512
-    device = "cuda"
-    dtype = torch.bfloat16
-    input_weight = create_input_weight(dim, device, dtype)
-
-    block_code = create_dynamic_map().to(device)
-    param = bnb.nn.Params4bit(
-        input_weight, requires_grad=False, quant_type="nf4"
-    ).cuda()
-    qstate = param.quant_state
-    nested_qstate = param.quant_state.state2
-
-    quantized_data = param
-    quantized_scalers = qstate.absmax
-    nested_scale_factors = nested_qstate.absmax
-    quantized_scaler_mean = qstate.offset
-
-    decoded = lookup_scaler_code(quantized_scalers, block_code)
-    print(decoded.shape, decoded.dtype, decoded.view(-1)[:5])
-
-    out = torch.empty_like(decoded)
-    total_elements = quantized_scalers.numel()
-    BLOCK_X = total_elements
-    grid = (triton.cdiv(total_elements, BLOCK_X),)
-
-    lookup_kernel[grid](quantized_scalers, block_code, out, BLOCK_X=BLOCK_X)
-    print(out.shape, out.dtype, out.view(-1)[:5])
-    if not torch.allclose(out, decoded):
-        diff = (out - decoded).abs().max()
-        print(f"diff: {diff}")
 
 def create_nf4_code(device):
     return torch.tensor(NF4_CODE, device=device, dtype=torch.float32)
@@ -216,8 +218,10 @@ def test_triton_dequant():
     dim = 512
     device = "cuda"
     dtype = torch.bfloat16
-    input_weight = create_input_weight(dim, device, dtype)
+#    input_weight = create_input_weight(dim, device, dtype)
 
+    input_weight = torch.randn(dim, device=device, dtype=dtype)
+    
     param = bnb.nn.Params4bit(
         input_weight, requires_grad=False, quant_type="nf4"
     ).cuda()
@@ -232,7 +236,7 @@ def test_triton_dequant():
     block_code = create_dynamic_map().to(device)
     nf4_code = create_nf4_code(device)
 
-    grid = lambda meta: (triton.cdiv(quantized_data.numel(), meta['QBLOCKS_PER_CTA'] * meta['QBLOCK_SIZE']),)
+    grid = lambda meta: (triton.cdiv(input_weight.numel(), meta['QBLOCKS_PER_CTA'] * meta['QBLOCK_SIZE']),)
     dq = torch.empty_like(input_weight)
     ref_interleaved = get_ref_interleaved(quantized_data, nf4_code).reshape(input_weight.shape).to(input_weight.dtype)
 
@@ -248,6 +252,9 @@ def test_triton_dequant():
         NESTED_QBLOCK_SIZE=NESTED_BLOCK_SIZE,
         QBLOCKS_PER_CTA=1)
 
+    print(dq.view(-1)[:5], dq.view(-1)[-5:])
+    print(ref_interleaved.view(-1)[:5], ref_interleaved.view(-1)[-5:])
+    print(torch.allclose(dq, ref_interleaved))
     if not torch.allclose(dq, ref_interleaved):
         for i in range(dq.numel()):
             if dq.view(-1)[i] != ref_interleaved.view(-1)[i]:
