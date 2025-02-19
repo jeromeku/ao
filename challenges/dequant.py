@@ -97,6 +97,8 @@ def dequant_nf4_kernel(
     output_offset = block_offset * OUTPUT_ELEMENTS_PER_QBLOCK
     #offset = block_idx * QBLOCKS_PER_CTA * INPUT_ELEMENTS_PER_QBLOCK
     q_load_idx = input_offset + tl.arange(0, INPUT_ELEMENTS_PER_QBLOCK)
+    q_load_idx = tl.max_contiguous(tl.multiple_of(q_load_idx, INPUT_ELEMENTS_PER_QBLOCK), INPUT_ELEMENTS_PER_QBLOCK)
+
     q = tl.load(q_ptr + q_load_idx)
     q_first_elements = q >> 4
     q_second_elements = q & 0xF
@@ -105,10 +107,11 @@ def dequant_nf4_kernel(
     interleaved = tl.interleave(dq_first_elements, dq_second_elements)
 
     # Load qabsmax
-    qabsmax_elements_to_load: tl.constexpr = QBLOCKS_PER_CTA
+    QABSMAX_ELEMENTS_TO_LOAD: tl.constexpr = QBLOCKS_PER_CTA
     # Previously block_offset = block_idx = tl.program_id(axis=0)
-    qabsmax_offset = block_offset * qabsmax_elements_to_load
-    qabsmax_load_idx = qabsmax_offset + tl.arange(0, qabsmax_elements_to_load)
+    qabsmax_offset = block_offset * QABSMAX_ELEMENTS_TO_LOAD
+    qabsmax_load_idx = qabsmax_offset + tl.arange(0, QABSMAX_ELEMENTS_TO_LOAD)
+    qabsmax_load_idx = tl.max_contiguous(tl.multiple_of(qabsmax_load_idx, QABSMAX_ELEMENTS_TO_LOAD), QABSMAX_ELEMENTS_TO_LOAD)
     qabsmax = tl.load(qabsmax_ptr + qabsmax_load_idx)
     dqabsmax = lut_device_kernel(qabsmax, block_code_ptr)
    
