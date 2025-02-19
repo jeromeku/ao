@@ -179,6 +179,8 @@ def dequant_nf4_kernel(
     block_code_ptr,
     # Output
     dq_ptr,
+    # For debugging only
+    dqabsmax_ptr,
     # Quantized data block size
     QBLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
     # Nested block size
@@ -201,6 +203,15 @@ def dequant_nf4_kernel(
     interleaved = tl.interleave(dq_first_elements, dq_second_elements)
     store_idx = block_idx * output_elements_per_qblock + tl.arange(0, output_elements_per_qblock)
     tl.store(dq_ptr + store_idx, interleaved)
+
+    # Load qabsmax
+    qabsmax_elements_to_load: tl.constexpr = QBLOCKS_PER_CTA
+    qabsmax_load_idx = block_idx * qabsmax_elements_to_load + tl.arange(0, qabsmax_elements_to_load)
+    qabsmax = tl.load(qabsmax_ptr + qabsmax_load_idx)
+    dqabsmax = lookup_code(qabsmax, block_code_ptr)
+    # Store and load indices are the same
+    tl.store(dqabsmax_ptr + qabsmax_load_idx, dqabsmax)
+
 
 def create_nf4_code(device):
     return torch.tensor(NF4_CODE, device=device, dtype=torch.float32)
@@ -240,6 +251,10 @@ def test_triton_dequant():
     dq = torch.empty_like(input_weight)
     ref_interleaved = get_ref_interleaved(quantized_data, nf4_code).reshape(input_weight.shape).to(input_weight.dtype)
 
+    ref_dqabsmax = lookup_scaler_code(quantized_scalers, block_code)
+    dqabsmax = torch.empty_like(ref_dqabsmax)
+
+    qblocks_per_cta = 8
     dequant_nf4_kernel[grid](
         q_ptr=quantized_data, 
         nf4_code_ptr=nf4_code, 
@@ -248,15 +263,18 @@ def test_triton_dequant():
         qabsmax_mean_ptr=quantized_scaler_mean, 
         block_code_ptr=block_code, 
         dq_ptr=dq,
+        dqabsmax_ptr=dqabsmax,
         QBLOCK_SIZE=BLOCK_SIZE, 
         NESTED_QBLOCK_SIZE=NESTED_BLOCK_SIZE,
-        QBLOCKS_PER_CTA=1)
+        QBLOCKS_PER_CTA=qblocks_per_cta)
 
-    print(dq.view(-1)[:5], dq.view(-1)[-5:])
-    print(ref_interleaved.view(-1)[:5], ref_interleaved.view(-1)[-5:])
-    print(torch.allclose(dq, ref_interleaved))
-    if not torch.allclose(dq, ref_interleaved):
-        for i in range(dq.numel()):
-            if dq.view(-1)[i] != ref_interleaved.view(-1)[i]:
-                print(f"diff at index {i}: {dq.view(-1)[i]} vs {ref_interleaved.view(-1)[i]}")
+    print("dqabsmax", torch.allclose(dqabsmax, ref_dqabsmax))
+    print("dq", torch.allclose(dq, ref_interleaved))
+    # print(dq.view(-1)[:5], dq.view(-1)[-5:])
+    # print(ref_interleaved.view(-1)[:5], ref_interleaved.view(-5:])
+    # print(torch.allclose(dq, ref_interleaved))
+    # if not torch.allclose(dq, ref_interleaved):
+    #     for i in range(dq.numel()):
+    #         if dq.view(-1)[i] != ref_interleaved.view(-1)[i]:
+    #             print(f"diff at index {i}: {dq.view(-1)[i]} vs {ref_interleaved.view(-1)[i]}")
 test_triton_dequant()
