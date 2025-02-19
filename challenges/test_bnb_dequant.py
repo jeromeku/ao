@@ -308,7 +308,8 @@ def test_triton_dequant():
     dqabsmax = torch.empty_like(ref_dqabsmax)
     dqabsmax_scalers = torch.empty_like(nested_scale_factors)
     interleaved = torch.empty_like(ref_interleaved)
-    qblocks_per_cta = 1
+    
+    qblocks_per_cta = 2
     print("qblocks_per_cta", qblocks_per_cta)
     grid = lambda meta: (triton.cdiv(input_weight.numel(), meta['QBLOCKS_PER_CTA'] * meta['QBLOCK_SIZE']),)
     print("grid", grid(meta={'QBLOCKS_PER_CTA': qblocks_per_cta, 'QBLOCK_SIZE': BLOCK_SIZE}))
