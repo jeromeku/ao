@@ -175,26 +175,26 @@ def triton_dequant_nf4(qparam: bnb.nn.Params4bit, QBLOCKS_PER_CTA=None, autotune
 def unsloth_dequantize(qparam: bnb.nn.Params4bit):
     return fast_dequantize(qparam, qparam.quant_state)
 
-def test_equivalence(shape, dtype, qblocks_per_cta=None, autotune=False):
+def test_equivalence(shape, dtype, qblocks_per_cta=None, autotune=False, include_unsloth=True):
     input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
     qparam = create_qparam(input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True)
     ref_dq = dequantize_nf4(qparam, quant_state=qparam.quant_state)
     dq = triton_dequant_nf4(qparam=qparam, QBLOCKS_PER_CTA=qblocks_per_cta, autotune=autotune)
-    if not torch.allclose(dq, ref_dq):
-        diff = (dq - ref_dq).abs().max()
-        # insert unicode cross
-        print(f"\u2717 triton kernel failed for qblocks_per_cta={qblocks_per_cta}, diff={diff}")
-    else:
-        print(f"\u2713 triton kernel passed for qblocks_per_cta={qblocks_per_cta}")
-    
-    unsloth_dq = unsloth_dequantize(qparam)
-    if not torch.allclose(unsloth_dq, ref_dq):
-        diff = (unsloth_dq - ref_dq).abs().max()
-        print(f"\u2717 unsloth: diff={diff}")
-    else:
-        print(f"\u2713 unsloth passed")
 
-def benchmark_dequant(shape, dtype, qblocks_per_cta):
+    passed = torch.allclose(dq, ref_dq)
+    if passed:
+        print(f"\u2713 triton kernel passed")
+    else:
+        diff = (dq - ref_dq).abs().max()
+        print(f"\u2717 triton kernel failed, diff={diff}")
+
+    if include_unsloth:
+        unsloth_dq = unsloth_dequantize(qparam)
+        assert torch.allclose(unsloth_dq, ref_dq), f"unsloth != bnb dequant"
+
+    return passed
+
+def benchmark_dequant(shape, dtype, qblocks_per_cta, include_unsloth=True):
     input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
     qparam = create_qparam(input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True)
     bnb_time = do_bench(lambda: dequantize_nf4(qparam, quant_state=qparam.quant_state))
@@ -214,7 +214,16 @@ if __name__ == "__main__":
     qblocks_per_cta = 8
     for shape in SHAPES[0]:
         for qblocks_per_cta in [2 ** p for p in range(0, MAX_BLOCKS_PER_CTA + 1)]:
-            test_equivalence(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta, autotune=False)
+            print(f"Testing shape: {shape}, qblocks_per_cta: {qblocks_per_cta}")
+            passed = test_equivalence(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta, autotune=False, include_unsloth=False)
+            if not passed:
+                raise AssertionError(f"triton kernel equivalence failed at shape {shape}, qblocks_per_cta={qblocks_per_cta}")
+            print(f"Testing shape: {shape}, autotuned")
+            passed = test_equivalence(shape=shape, dtype=dtype, autotune=True, include_unsloth=False)
+            if not passed:
+                raise AssertionError(f"triton kernel equivalence failed at shape {shape}, autotuned")
+            print("-"*100)
+
         #benchmark_dequant(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta)
     
     # test_fast_dequant(shape=shape, dtype=dtype)
