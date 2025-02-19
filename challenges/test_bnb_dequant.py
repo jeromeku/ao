@@ -105,6 +105,7 @@ def test_bnb_dequant():
 
 @triton.jit
 def lookup_code(q, code_ptr):
+    # Need to cast to use as pointer index
     q = q.to(tl.int32)
     return tl.load(code_ptr + q)
 
@@ -118,6 +119,54 @@ def lookup_kernel(q_ptr, code_ptr, out_ptr, BLOCK_X: tl.constexpr):
     out = lookup_code(qs, code_ptr)
     tl.store(out_ptr + load_idx, out)
  
+# Launch a 1-D grid 
+# let QBLOCKS = number fo quantized blocks = len(quantized_data) // QBLOCK_SIZE
+# let QBLOCKS_PER_CTA = number of quantized blocks to process per CTA
+# Simple case is QBLOCKS_PER_CTA = 1
+# for QBLOCK_SIZE = 64 -> must output 64 dequantized elements per CTA
+# NOTE: since we have 2 elements per each quantized data element, we need to load only 32 elements per CTA
+# each block processes ELEMENTS_PER_BLOCK elements and hence must load ELEMENTS_PER_BLOCK
+# Each quantized block corresponds to 1 quantized absmax and len(quantized_absmax) // QBLOCK_SIZE qabs_max_scalers
+
+@triton.jit
+def dequant_nf4_kernel(
+    # Quantized data
+    q_ptr, 
+    # NF4 code
+    nf4_code_ptr, 
+    # Compressed statistics
+    # Quantized absmax
+    qabsmax_ptr,
+    # Scale factors for quantized absmax
+    qabsmax_scalers_ptr,
+    # Offset for quantized absmax
+    qabsmax_mean_ptr,
+    # Double quant block code
+    block_code_ptr,
+    # Output
+    dq_ptr,
+    # Quantized data block size
+    QBLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
+    # Nested block size
+    NESTED_QBLOCK_SIZE: tl.constexpr = NESTED_BLOCK_SIZE,
+    QBLOCKS_PER_CTA: tl.constexpr = 1):
+    
+    output_elements_per_qblock: tl.constexpr = QBLOCKS_PER_CTA * QBLOCK_SIZE
+    input_elements_per_qblock: tl.constexpr = output_elements_per_qblock // 2
+
+    # Load quantized data
+    block_idx = tl.program_id(axis=0)
+    offset = block_idx * QBLOCKS_PER_CTA * input_elements_per_qblock
+    q_load_idx = offset + tl.arange(0, input_elements_per_qblock)
+    q = tl.load(q_ptr + q_load_idx)
+    q_first_elements = q >> 4
+    q_second_elements = q & 0xF
+    dq_first_elements = lookup_code(q_first_elements, nf4_code_ptr)
+    dq_second_elements = lookup_code(q_second_elements, nf4_code_ptr)
+    interleaved = tl.interleave(dq_first_elements, dq_second_elements)
+    store_idx = block_idx * output_elements_per_qblock + tl.arange(0, output_elements_per_qblock)
+    tl.store(dq_ptr + store_idx, interleaved)
+
 def test_triton_lookup():
     torch.manual_seed(SEED)
     dim = 512
@@ -151,4 +200,56 @@ def test_triton_lookup():
         diff = (out - decoded).abs().max()
         print(f"diff: {diff}")
 
-test_triton_lookup()
+def create_nf4_code(device):
+    return torch.tensor(NF4_CODE, device=device, dtype=torch.float32)
+
+def get_ref_interleaved(quantized_data, nf4_code):
+    first_elements = quantized_data >> 4
+    second_elements = quantized_data & 0xF
+    decoded_first_elements = lookup_scaler_code(first_elements, nf4_code)
+    decoded_second_elements = lookup_scaler_code(second_elements, nf4_code)
+    interleaved = interleave(decoded_first_elements, decoded_second_elements)
+    return interleaved
+
+def test_triton_dequant():
+    torch.manual_seed(SEED)
+    dim = 512
+    device = "cuda"
+    dtype = torch.bfloat16
+    input_weight = create_input_weight(dim, device, dtype)
+
+    param = bnb.nn.Params4bit(
+        input_weight, requires_grad=False, quant_type="nf4"
+    ).cuda()
+    qstate = param.quant_state
+    nested_qstate = param.quant_state.state2
+
+    quantized_data = param
+    quantized_scalers = qstate.absmax
+    nested_scale_factors = nested_qstate.absmax
+    quantized_scaler_mean = qstate.offset
+
+    block_code = create_dynamic_map().to(device)
+    nf4_code = create_nf4_code(device)
+
+    grid = lambda meta: (triton.cdiv(quantized_data.numel(), meta['QBLOCKS_PER_CTA'] * meta['QBLOCK_SIZE']),)
+    dq = torch.empty_like(input_weight)
+    ref_interleaved = get_ref_interleaved(quantized_data, nf4_code).reshape(input_weight.shape).to(input_weight.dtype)
+
+    dequant_nf4_kernel[grid](
+        q_ptr=quantized_data, 
+        nf4_code_ptr=nf4_code, 
+        qabsmax_ptr=quantized_scalers, 
+        qabsmax_scalers_ptr=nested_scale_factors, 
+        qabsmax_mean_ptr=quantized_scaler_mean, 
+        block_code_ptr=block_code, 
+        dq_ptr=dq,
+        QBLOCK_SIZE=BLOCK_SIZE, 
+        NESTED_QBLOCK_SIZE=NESTED_BLOCK_SIZE,
+        QBLOCKS_PER_CTA=1)
+
+    if not torch.allclose(dq, ref_interleaved):
+        for i in range(dq.numel()):
+            if dq.view(-1)[i] != ref_interleaved.view(-1)[i]:
+                print(f"diff at index {i}: {dq.view(-1)[i]} vs {ref_interleaved.view(-1)[i]}")
+test_triton_dequant()
