@@ -272,7 +272,7 @@ def benchmark_dequant(shape, dtype, qblocks_per_cta=None, autotune=True):
     tt_unsloth_mark = "\u2713" if tt_unsloth_speedup > 1 else "\u2717"
     print(
         f"\033[1m{tt_unsloth_mark} triton / unsloth speedup: {tt_unsloth_speedup:.2f}x\033[0m",
-        f" Latency: bnb {bnb_time:.4f}ms, triton {tt_time:.4f}ms, unsloth {unsloth_time:.4f}ms",
+        f" Latency: triton {tt_time:.4f}ms, unsloth {unsloth_time:.4f}ms, bnb {bnb_time:.4f}ms",
         f" Speedups:",
         f"  triton / unsloth: {tt_unsloth_speedup:.2f}x",
         f"  triton / bnb: {tt_bnb_speedup:.2f}x",
