@@ -11,11 +11,9 @@ from bitsandbytes.functional import (
     dequantize_blockwise,
     dequantize_nf4,
 )
+from unsloth.kernels.utils import fast_dequantize
 
 from torchao.dtypes.nf4tensor import to_nf4
-
-#from unsloth.kernels.utils import fast_dequantize
-
 
 DEVICE = "cuda"
 
@@ -345,26 +343,50 @@ def triton_dequant_nf4(qparam: bnb.nn.Params4bit, QBLOCKS_PER_CTA=1):
 
     nf4_code = qstate.code
     block_code = qstate.state2.code
-    breakpoint()
+    
+    NUM_PACKED_ELEMENTS = quantized_data.element_size() * 8 // 4
+    OUTPUT_DTYPE = torch_to_triton_dtype(qstate.dtype)
+    dq = torch.empty(qstate.shape, device=qparam.device, dtype=qstate.dtype)
+    grid = lambda meta: (triton.cdiv(dq.numel(), meta['QBLOCKS_PER_CTA'] * meta['QBLOCK_SIZE']),)
 
-    # dq = torch.empty_like(input_weight)
-    # grid = lambda meta: (triton.cdiv(input_weight.numel(), meta['QBLOCKS_PER_CTA'] * meta['QBLOCK_SIZE']),)
-    # NUM_PACKED_ELEMENTS = quantized_data.element_size() * 8 // 4
-    # OUTPUT_DTYPE = torch_to_triton_dtype(qstate.dtype)
+    dequant_nf4_kernel[grid](
+        q_ptr=quantized_data, 
+        nf4_code_ptr=nf4_code, 
+        qabsmax_ptr=quantized_scalers, 
+        qabsmax_scalers_ptr=nested_scale_factors, 
+        qabsmax_mean_ptr=quantized_scaler_mean, 
+        block_code_ptr=block_code, 
+        dq_ptr=dq,
+        QBLOCK_SIZE=BLOCK_SIZE, 
+        NESTED_QBLOCK_SIZE=NESTED_BLOCK_SIZE,
+        QBLOCKS_PER_CTA=QBLOCKS_PER_CTA,
+        NUM_PACKED_ELEMENTS=NUM_PACKED_ELEMENTS,
+        OUTPUT_DTYPE=OUTPUT_DTYPE)
 
-    # dequant_nf4_kernel[grid](
-    #     q_ptr=quantized_data, 
-    #     nf4_code_ptr=nf4_code, 
-    #     qabsmax_ptr=quantized_scalers, 
-    #     qabsmax_scalers_ptr=nested_scale_factors, 
-    #     qabsmax_mean_ptr=quantized_scaler_mean, 
-    #     block_code_ptr=block_code, 
-    #     dq_ptr=dq,
-    #     QBLOCK_SIZE=BLOCK_SIZE, 
-    #     NESTED_QBLOCK_SIZE=NESTED_BLOCK_SIZE,
-    #     QBLOCKS_PER_CTA=QBLOCKS_PER_CTA,
-    #     NUM_PACKED_ELEMENTS=NUM_PACKED_ELEMENTS,
-    #     OUTPUT_DTYPE=OUTPUT_DTYPE)
+    return dq
+
+def unsloth_dequantize(qparam: bnb.nn.Params4bit):
+    return fast_dequantize(qparam, qparam.quant_state)
+
+def test_equivalence(shape, dtype, qblocks_per_cta):
+    input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
+    qparam = create_qparam(input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True)
+    ref_dq = dequantize_nf4(qparam, quant_state=qparam.quant_state)
+   
+    dq = triton_dequant_nf4(qparam=qparam, QBLOCKS_PER_CTA=qblocks_per_cta)
+    if not torch.allclose(dq, ref_dq):
+        diff = (dq - ref_dq).abs().max()
+        # insert unicode cross
+        print(f"\u2717 triton kernel failed for qblocks_per_cta={qblocks_per_cta}, diff={diff}")
+    else:
+        print(f"\u2713 triton kernel passed for qblocks_per_cta={qblocks_per_cta}")
+    
+    unsloth_dq = unsloth_dequantize(qparam)
+    if not torch.allclose(unsloth_dq, ref_dq):
+        diff = (unsloth_dq - ref_dq).abs().max()
+        print(f"\u2717 unsloth: diff={diff}")
+    else:
+        print(f"\u2713 unsloth passed")
 
 if __name__ == "__main__":
     torch.manual_seed(SEED)
@@ -373,9 +395,7 @@ if __name__ == "__main__":
     shape = (512, 512) # (4096, 4096), (4096, 14336)
     dtype = torch.bfloat16
     qblocks_per_cta = 1
-    input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
-    qparam = create_qparam(input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True)
-    triton_dequant_nf4(qparam=qparam, qblocks_per_cta=qblocks_per_cta)
+    test_equivalence(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta)
     # test_fast_dequant(shape=shape, dtype=dtype)
     # q_blocks_per_cta = [2 ** p for p in range(0, MAX_BLOCKS_PER_CTA + 1)]
     # for dtype in [torch.bfloat16, torch.float16]:
