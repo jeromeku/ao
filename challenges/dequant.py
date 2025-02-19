@@ -11,6 +11,7 @@ from bitsandbytes.functional import (
     dequantize_blockwise,
     dequantize_nf4,
 )
+from triton.testing import do_bench
 from unsloth.kernels.utils import fast_dequantize
 
 from torchao.dtypes.nf4tensor import to_nf4
@@ -388,6 +389,16 @@ def test_equivalence(shape, dtype, qblocks_per_cta):
     else:
         print(f"\u2713 unsloth passed")
 
+def benchmark_dequant(shape, dtype, qblocks_per_cta):
+    input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
+    qparam = create_qparam(input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True)
+    bnb_time = do_bench(lambda: dequantize_nf4(qparam, quant_state=qparam.quant_state))
+    tt_time = do_bench(lambda: triton_dequant_nf4(qparam=qparam, QBLOCKS_PER_CTA=qblocks_per_cta))
+    unsloth_time = do_bench(lambda: unsloth_dequantize(qparam))
+    print(f"bnb time: {bnb_time}")
+    print(f"triton time: {tt_time}")
+    print(f"unsloth time: {unsloth_time}")
+
 if __name__ == "__main__":
     torch.manual_seed(SEED)
     
@@ -395,7 +406,9 @@ if __name__ == "__main__":
     shape = (512, 512) # (4096, 4096), (4096, 14336)
     dtype = torch.bfloat16
     qblocks_per_cta = 1
-    test_equivalence(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta)
+    benchmark_dequant(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta)
+    #test_equivalence(shape=shape, dtype=dtype, qblocks_per_cta=qblocks_per_cta)
+    
     # test_fast_dequant(shape=shape, dtype=dtype)
     # q_blocks_per_cta = [2 ** p for p in range(0, MAX_BLOCKS_PER_CTA + 1)]
     # for dtype in [torch.bfloat16, torch.float16]:
