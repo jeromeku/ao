@@ -62,7 +62,7 @@ def lut_device_kernel(q, code_ptr):
     return tl.load(code_ptr + q)
 
 @triton.jit
-def dequant_nf4_kernel(
+def _dequant_nf4_kernel(
     # Quantized data
     q_ptr, 
     # NF4 code
@@ -148,6 +148,80 @@ def dequant_nf4_kernel(
     store_idx = output_offset + tl.arange(0, OUTPUT_ELEMENTS_PER_QBLOCK)
     tl.store(dq_ptr + store_idx, tl.reshape(dq, OUTPUT_ELEMENTS_PER_QBLOCK))
     tl.store(interleaved_ptr + store_idx, tl.reshape(interleaved, OUTPUT_ELEMENTS_PER_QBLOCK))
+
+@triton.jit
+def dequant_nf4_kernel(
+    # Quantized data
+    q_ptr, 
+    # NF4 code
+    nf4_code_ptr, 
+    # Compressed statistics
+    # Quantized absmax
+    qabsmax_ptr,
+    # Scale factors for quantized absmax
+    qabsmax_scalers_ptr,
+    # Offset for quantized absmax
+    qabsmax_mean_ptr,
+    # Double quant block code
+    block_code_ptr,
+    # Output
+    dq_ptr,
+    # Quantized data block size
+    QBLOCK_SIZE: tl.constexpr = BLOCK_SIZE,
+    # Nested block size
+    NESTED_QBLOCK_SIZE: tl.constexpr = NESTED_BLOCK_SIZE,
+    QBLOCKS_PER_CTA: tl.constexpr = 1,
+    NUM_PACKED_ELEMENTS: tl.constexpr = 2,
+    OUTPUT_DTYPE: tl.constexpr = tl.bfloat16,
+    DEBUG: tl.constexpr = False):
+    
+    OUTPUT_ELEMENTS_PER_QBLOCK: tl.constexpr = QBLOCKS_PER_CTA * QBLOCK_SIZE
+    # Divide by NUM_PACKED_ELEMENTS to account for packed elements
+    # Default quant storage is uint 8 => 8 bits // 4 bits => 2 packed elements
+
+    tl.static_assert(OUTPUT_ELEMENTS_PER_QBLOCK % NUM_PACKED_ELEMENTS == 0, "OUTPUT_ELEMENTS_PER_QBLOCK must be divisible by NUM_PACKED_ELEMENTS")
+    INPUT_ELEMENTS_PER_QBLOCK: tl.constexpr = OUTPUT_ELEMENTS_PER_QBLOCK // NUM_PACKED_ELEMENTS
+
+    # Load quantized data
+    block_offset = tl.program_id(axis=0) 
+    input_offset = block_offset * INPUT_ELEMENTS_PER_QBLOCK
+    output_offset = block_offset * OUTPUT_ELEMENTS_PER_QBLOCK
+    #offset = block_idx * QBLOCKS_PER_CTA * INPUT_ELEMENTS_PER_QBLOCK
+    q_load_idx = input_offset + tl.arange(0, INPUT_ELEMENTS_PER_QBLOCK)
+    q_load_idx = tl.max_contiguous(tl.multiple_of(q_load_idx, INPUT_ELEMENTS_PER_QBLOCK), INPUT_ELEMENTS_PER_QBLOCK)
+
+    q = tl.load(q_ptr + q_load_idx)
+    q_first_elements = q >> 4
+    q_second_elements = q & 0xF
+    dq_first_elements = lut_device_kernel(q_first_elements, nf4_code_ptr)
+    dq_second_elements = lut_device_kernel(q_second_elements, nf4_code_ptr)
+    interleaved = tl.interleave(dq_first_elements, dq_second_elements)
+
+    # Load qabsmax
+    QABSMAX_ELEMENTS_TO_LOAD: tl.constexpr = QBLOCKS_PER_CTA
+    # Previously block_offset = block_idx = tl.program_id(axis=0)
+    qabsmax_offset = block_offset * QABSMAX_ELEMENTS_TO_LOAD
+    qabsmax_load_idx = qabsmax_offset + tl.arange(0, QABSMAX_ELEMENTS_TO_LOAD)
+    qabsmax_load_idx = tl.max_contiguous(tl.multiple_of(qabsmax_load_idx, QABSMAX_ELEMENTS_TO_LOAD), QABSMAX_ELEMENTS_TO_LOAD)
+    qabsmax = tl.load(qabsmax_ptr + qabsmax_load_idx)
+    dqabsmax = lut_device_kernel(qabsmax, block_code_ptr)
+   
+    qabsmax_scalers_offset = qabsmax_offset // NESTED_QBLOCK_SIZE
+    NUM_QABSMAX_SCALERS: tl.constexpr = (QBLOCKS_PER_CTA + NESTED_QBLOCK_SIZE - 1) // NESTED_QBLOCK_SIZE
+    tl.static_assert(NUM_QABSMAX_SCALERS == 1, "NUM_QABSMAX_SCALERS must be 1")
+    dqabsmax_scalers = tl.load(qabsmax_scalers_ptr + qabsmax_scalers_offset)
+    qabsmax_mean = tl.load(qabsmax_mean_ptr)
+
+    # Dequantize qabsmax
+    dqabsmax = dqabsmax * dqabsmax_scalers + qabsmax_mean
+    interleaved = tl.reshape(interleaved, (QBLOCKS_PER_CTA, QBLOCK_SIZE))
+    dqabsmax = tl.reshape(dqabsmax, (QBLOCKS_PER_CTA, 1))
+        
+    dq = interleaved * dqabsmax
+    dq = dq.to(OUTPUT_DTYPE)
+
+    store_idx = output_offset + tl.arange(0, OUTPUT_ELEMENTS_PER_QBLOCK)
+    tl.store(dq_ptr + store_idx, tl.reshape(dq, OUTPUT_ELEMENTS_PER_QBLOCK))
 
 def create_nf4_code(device):
     return torch.tensor(NF4_CODE, device=device, dtype=torch.float32)
@@ -260,7 +334,7 @@ def test_fast_dequant(shape, dtype, quant_type="nf4", quant_storage=torch.uint8,
 #     input_weight = torch.randn(shape, device=DEVICE, dtype=dtype)
 #     fast_dequantize(input_weight, qstate)
 
-def triton_dequant_nf4(qparam: bnb.nn.Params4bit, qblocks_per_cta=1):
+def triton_dequant_nf4(qparam: bnb.nn.Params4bit, QBLOCKS_PER_CTA=1):
     qstate = qparam.quant_state
     nested_qstate = qparam.quant_state.state2
 
@@ -272,6 +346,25 @@ def triton_dequant_nf4(qparam: bnb.nn.Params4bit, qblocks_per_cta=1):
     nf4_code = qstate.code
     block_code = qstate.state2.code
     breakpoint()
+
+    # dq = torch.empty_like(input_weight)
+    # grid = lambda meta: (triton.cdiv(input_weight.numel(), meta['QBLOCKS_PER_CTA'] * meta['QBLOCK_SIZE']),)
+    # NUM_PACKED_ELEMENTS = quantized_data.element_size() * 8 // 4
+    # OUTPUT_DTYPE = torch_to_triton_dtype(qstate.dtype)
+
+    # dequant_nf4_kernel[grid](
+    #     q_ptr=quantized_data, 
+    #     nf4_code_ptr=nf4_code, 
+    #     qabsmax_ptr=quantized_scalers, 
+    #     qabsmax_scalers_ptr=nested_scale_factors, 
+    #     qabsmax_mean_ptr=quantized_scaler_mean, 
+    #     block_code_ptr=block_code, 
+    #     dq_ptr=dq,
+    #     QBLOCK_SIZE=BLOCK_SIZE, 
+    #     NESTED_QBLOCK_SIZE=NESTED_BLOCK_SIZE,
+    #     QBLOCKS_PER_CTA=QBLOCKS_PER_CTA,
+    #     NUM_PACKED_ELEMENTS=NUM_PACKED_ELEMENTS,
+    #     OUTPUT_DTYPE=OUTPUT_DTYPE)
 
 if __name__ == "__main__":
     torch.manual_seed(SEED)
