@@ -189,9 +189,9 @@ def dequant_nf4_kernel(
     NESTED_QBLOCK_SIZE: tl.constexpr = NESTED_BLOCK_SIZE,
     QBLOCKS_PER_CTA: tl.constexpr = 1,
     NUM_PACKED_ELEMENTS: tl.constexpr = 2,
-    OUTPUT_DTYPE: tl.constexpr = tl.bfloat16):
+    OUTPUT_DTYPE: tl.constexpr = tl.bfloat16,
+    DEBUG: tl.constexpr = False):
     
-    tl.static_print("grid size", tl.num_programs(axis=0))
     OUTPUT_ELEMENTS_PER_QBLOCK: tl.constexpr = QBLOCKS_PER_CTA * QBLOCK_SIZE
     # Divide by NUM_PACKED_ELEMENTS to account for packed elements
     # Default quant storage is uint 8 => 8 bits // 4 bits => 2 packed elements
@@ -225,21 +225,23 @@ def dequant_nf4_kernel(
     tl.static_assert(NUM_QABSMAX_SCALERS == 1, "NUM_QABSMAX_SCALERS must be 1")
     dqabsmax_scalers = tl.load(qabsmax_scalers_ptr + qabsmax_scalers_offset)
     qabsmax_mean = tl.load(qabsmax_mean_ptr)
-    tl.static_print("dqabsmax", dqabsmax)
-    tl.static_print("dqabsmax_scalers", dqabsmax_scalers)
 
     # Dequantize qabsmax
     dqabsmax = dqabsmax * dqabsmax_scalers + qabsmax_mean
     tl.store(dqabsmax_ptr + qabsmax_load_idx, dqabsmax)
 
-    tl.static_print("interleaved", interleaved)
     interleaved = tl.reshape(interleaved, (QBLOCKS_PER_CTA, QBLOCK_SIZE))
-    tl.static_print("interleaved_reshaped", interleaved)
     dqabsmax = tl.reshape(dqabsmax, (QBLOCKS_PER_CTA, 1))
-    tl.static_print("dqabsmax", dqabsmax)
+        
     dq = interleaved * dqabsmax
     dq = dq.to(OUTPUT_DTYPE)
-    tl.static_print("dq", dq)
+
+    if DEBUG:
+        tl.static_print("dqabsmax", dqabsmax)
+        tl.static_print("dqabsmax_scalers", dqabsmax_scalers)
+        tl.static_print("interleaved", interleaved)
+        tl.static_print("dqabsmax", dqabsmax)
+        tl.static_print("dq", dq)
 
     store_idx = output_offset + tl.arange(0, OUTPUT_ELEMENTS_PER_QBLOCK)
     tl.store(dq_ptr + store_idx, tl.reshape(dq, OUTPUT_ELEMENTS_PER_QBLOCK))
@@ -309,39 +311,43 @@ def test_triton_dequant():
     dqabsmax_scalers = torch.empty_like(nested_scale_factors)
     interleaved = torch.empty_like(ref_interleaved)
     
-    qblocks_per_cta = 2
-    print("qblocks_per_cta", qblocks_per_cta)
-    grid = lambda meta: (triton.cdiv(input_weight.numel(), meta['QBLOCKS_PER_CTA'] * meta['QBLOCK_SIZE']),)
-    print("grid", grid(meta={'QBLOCKS_PER_CTA': qblocks_per_cta, 'QBLOCK_SIZE': BLOCK_SIZE}))
-    total_blocks = input_weight.numel() // BLOCK_SIZE
-    print("total_blocks", total_blocks)
-    num_packed_elements = quantized_data.element_size() * 8 // 4
-    print("num_packed_elements", num_packed_elements)
-    output_dtype = torch_to_triton_dtype(qstate.dtype)
-    print("output_dtype", output_dtype)
-    reconstructed_dq = dequantize_nf4(quantized_data, qstate)
+    for qblocks_per_cta in [2 ** p for p in range(0, 9)]:
+        print("qblocks_per_cta", qblocks_per_cta)
+        grid = lambda meta: (triton.cdiv(input_weight.numel(), meta['QBLOCKS_PER_CTA'] * meta['QBLOCK_SIZE']),)
+        print("grid", grid(meta={'QBLOCKS_PER_CTA': qblocks_per_cta, 'QBLOCK_SIZE': BLOCK_SIZE}))
+        total_blocks = input_weight.numel() // BLOCK_SIZE
+        print("total_blocks", total_blocks)
+        num_packed_elements = quantized_data.element_size() * 8 // 4
+        print("num_packed_elements", num_packed_elements)
+        output_dtype = torch_to_triton_dtype(qstate.dtype)
+        print("output_dtype", output_dtype)
+        reconstructed_dq = dequantize_nf4(quantized_data, qstate)
 
-    dequant_nf4_kernel[grid](
-        q_ptr=quantized_data, 
-        nf4_code_ptr=nf4_code, 
-        qabsmax_ptr=quantized_scalers, 
-        qabsmax_scalers_ptr=nested_scale_factors, 
-        qabsmax_mean_ptr=quantized_scaler_mean, 
-        block_code_ptr=block_code, 
-        dq_ptr=dq,
-        interleaved_ptr=interleaved,
-        dqabsmax_ptr=dqabsmax,
-        dqabsmax_scalers_ptr=dqabsmax_scalers,
-        QBLOCK_SIZE=BLOCK_SIZE, 
-        NESTED_QBLOCK_SIZE=NESTED_BLOCK_SIZE,
-        QBLOCKS_PER_CTA=qblocks_per_cta,
-        NUM_PACKED_ELEMENTS=num_packed_elements,
-        OUTPUT_DTYPE=output_dtype)
+        dequant_nf4_kernel[grid](
+            q_ptr=quantized_data, 
+            nf4_code_ptr=nf4_code, 
+            qabsmax_ptr=quantized_scalers, 
+            qabsmax_scalers_ptr=nested_scale_factors, 
+            qabsmax_mean_ptr=quantized_scaler_mean, 
+            block_code_ptr=block_code, 
+            dq_ptr=dq,
+            interleaved_ptr=interleaved,
+            dqabsmax_ptr=dqabsmax,
+            dqabsmax_scalers_ptr=dqabsmax_scalers,
+            QBLOCK_SIZE=BLOCK_SIZE, 
+            NESTED_QBLOCK_SIZE=NESTED_BLOCK_SIZE,
+            QBLOCKS_PER_CTA=qblocks_per_cta,
+            NUM_PACKED_ELEMENTS=num_packed_elements,
+            OUTPUT_DTYPE=output_dtype)
 
-    print("dqabsmax", torch.allclose(dqabsmax, ref_dqabsmax))
-    print("reconstructed_dq", torch.allclose(reconstructed_dq, ref_dq))
-    print("interleaved", torch.allclose(interleaved, ref_interleaved))
-    print("dq", torch.allclose(dq, ref_dq))
+        if not torch.allclose(dq, ref_dq):
+            print("dqabsmax", torch.allclose(dqabsmax, ref_dqabsmax))
+            print("reconstructed_dq", torch.allclose(reconstructed_dq, ref_dq))
+            print("interleaved", torch.allclose(interleaved, ref_interleaved))
+            raise ValueError(f"Dequantization failed for qblocks_per_cta {qblocks_per_cta}")
+        else:
+            # Insert unicode checkmark
+            print(f"\u2713 Dequantization passed for qblocks_per_cta {qblocks_per_cta}\n")
     # if not torch.allclose(dq, ref_dq):
     #     dq = dq.reshape(-1, BLOCK_SIZE)
     #     ref_dq = ref_dq.reshape(-1, BLOCK_SIZE)
