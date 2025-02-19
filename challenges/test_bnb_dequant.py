@@ -241,7 +241,7 @@ def dequant_nf4_kernel(
     dq = dq.to(OUTPUT_DTYPE)
     tl.static_print("dq", dq)
 
-    store_idx = block_offset * OUTPUT_ELEMENTS_PER_QBLOCK + tl.arange(0, OUTPUT_ELEMENTS_PER_QBLOCK)
+    store_idx = output_offset + tl.arange(0, OUTPUT_ELEMENTS_PER_QBLOCK)
     tl.store(dq_ptr + store_idx, tl.reshape(dq, OUTPUT_ELEMENTS_PER_QBLOCK))
     tl.store(interleaved_ptr + store_idx, tl.reshape(interleaved, OUTPUT_ELEMENTS_PER_QBLOCK))
     # Store and load indices are the same
