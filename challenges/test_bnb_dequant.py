@@ -273,7 +273,7 @@ def test_triton_dequant():
     dtype = torch.bfloat16
 #    input_weight = create_input_weight(dim, device, dtype)
 
-    input_weight = torch.randn(dim, device=device, dtype=dtype)
+    input_weight = torch.randn(dim, dim, device=device, dtype=dtype)
     
     param = bnb.nn.Params4bit(
         input_weight, requires_grad=False, quant_type="nf4"
