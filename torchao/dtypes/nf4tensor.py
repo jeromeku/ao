@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
+from torch._ops import OpOverload
 from torch._prims_common import make_contiguous_strides_for
 from torch.distributed.device_mesh import DeviceMesh
 
@@ -896,7 +897,7 @@ class NF4Tensor(torch.Tensor):
 
     @classmethod
     @torch._dynamo.disable
-    def __torch_dispatch__(cls, func, types, args, kwargs=None):
+    def __torch_dispatch__(cls, func: OpOverload, types, args, kwargs=None):
         """TODO we are not supporting torch dispatch at the moment
         instead we have created a Autograd.Function to handle the linear
         """
@@ -916,7 +917,10 @@ class NF4Tensor(torch.Tensor):
         if not all(allowed_subclasses(t) for t in types):
             return NotImplemented("Up to the next one to handle")
 
-        print(f"nf4 dispatching {func} with {[type(arg) for arg in args]} and {kwargs}")
+        print("\n--------------- NF4Tensor __torch_dispatch__ ----------------\n")
+        print(f"[{func._schema}] {func._opname}.{func._overloadname}\n {len(args)} arg{'s' if len(args) > 1 else ''}: {[type(arg) for arg in args]}\n kwargs: {kwargs}")
+        print("\n--------------------------------------------------------------\n")
+        
         if func in NF4_OPS_TABLE:
             return NF4_OPS_TABLE[func](func, args, kwargs)
         raise NotImplementedError(
