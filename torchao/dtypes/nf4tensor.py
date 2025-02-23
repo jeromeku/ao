@@ -16,7 +16,6 @@ aten = torch.ops.aten
 
 c10d_functional = torch.ops.c10d_functional
 
-
 NF4_OPS_TABLE: Dict[Any, Any] = {}
 
 
@@ -25,7 +24,12 @@ _INNER_TENSOR_NAMES_FOR_SHARDING = [
     "quantization_factor",
     "quantized_data",
 ]
-
+_NF4_QUANT_PROPS = [
+    "block_size",
+    "scaler_block_size",
+    "n_blocks",
+ ]
+_NF4_INNER_PROPS = _NF4_QUANT_PROPS + _INNER_TENSOR_NAMES_FOR_SHARDING
 # Note: Quantize in Chunks
 # During quantization to NF4, one of the steps to convert from the original float number
 # to the index of the nearest value in the NF4 format. This can cause a large memory spike
@@ -34,9 +38,30 @@ _INNER_TENSOR_NAMES_FOR_SHARDING = [
 # strike a good balance between memory and speed
 CHUNK_SIZE = 1024**2
 
+def print_nf4_metadata(tensor: "NF4Tensor"):
+    print("-------------------------------- NF4Tensor metadata --------------------------------")
+    print(f"NF4Tensor: {tensor.shape} {tensor.dtype} {tensor.device} {tensor.requires_grad}")
+    print("-------------------------------- NF4Tensor quantization props --------------------------------")
+    for prop in _NF4_QUANT_PROPS:
+        print(f"NF4Tensor prop: {prop}: {getattr(tensor, prop)}")
+    print("-------------------------------- NF4Tensor inner tensors --------------------------------")
+    for inner_tensor_name in _INNER_TENSOR_NAMES_FOR_SHARDING:
+        inner_tensor = getattr(tensor, inner_tensor_name)
+        print(f"NF4Tensor inner tensor: {inner_tensor_name} {inner_tensor.shape} {inner_tensor.dtype} {inner_tensor.device} {inner_tensor.requires_grad}")
+    print("--------------------------------------------------------------------------------")
 
 def same_metadata(a: "NF4Tensor", b: "NF4Tensor"):
     both_nf4 = isinstance(a, NF4Tensor) and isinstance(b, NF4Tensor)
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+    else:
+        rank = 0
+    if rank == 0:
+        print(f"DEBUG::same_metadata a: {a.block_size} {a.scaler_block_size} {a.n_blocks}", flush=True)
+        if isinstance(b, NF4Tensor):
+            print(f"DEBUG::same_metadata b: {b.block_size} {b.scaler_block_size} {b.n_blocks}", flush=True)
+        else:
+            print(f"DEBUG::same_metadata other tensor not NF4Tensor", flush=True)
     return (
         both_nf4
         and a.block_size == b.block_size
@@ -146,6 +171,7 @@ def expect_args_len_at_k(k: int, op: CompareOp, value: Any, msg: str):
 
 @implements([torch.ops.aten.detach])
 def noop_detach(func, *args, **kwargs):
+    print(f"noop_detach {args[0]}")
     return args[0][0]
 
 
@@ -268,21 +294,33 @@ def nf4_slice(aten_op, args, kwargs=None):
         aten.view.default,
     ]
 )
-@expect_args_len_at_k(1, CompareOp.EQ, 1, "aten.view(NF4Tensor) with len(size)=")
+#@expect_args_len_at_k(1, CompareOp.EQ, 1, "aten.view(NF4Tensor) with len(size)=")
 def nf4_view(aten_op, args, kwargs=None):
+    rank = torch.distributed.get_rank()
+
     nf4tensor = args[0]
     size = args[1]
-    if size[0] != -1:
-        raise NotImplementedError(f"aten.view(NF4Tensor) with size={size}")
-    updated_attrs = apply_to_inner_tensors(nf4tensor, aten_op, args[1:], kwargs)
-    updated_attrs.update(
-        {
-            "size": [nf4tensor.numel()],
-            "stride": (1,),
-        }
-    )
-    return NF4Tensor(*construct_nf4_args(nf4tensor, updated_attrs))
-
+    if len(size) == 1:
+        if rank == 0:
+            print(f"aten.view(NF4Tensor) with size={size}", flush=True)
+        if size[0] != -1:
+            raise NotImplementedError(f"aten.view(NF4Tensor) with size={size}")
+        updated_attrs = apply_to_inner_tensors(nf4tensor, aten_op, args[1:], kwargs)
+        updated_attrs.update(
+            {
+                "size": [nf4tensor.numel()],
+                "stride": (1,),
+            }
+        )
+        return NF4Tensor(*construct_nf4_args(nf4tensor, updated_attrs))
+    else:
+        original_shape = nf4tensor.shape
+        same_shape = original_shape == torch.Size(size)
+        if same_shape:
+            return nf4tensor.detach()
+        else:
+            raise NotImplementedError(f"aten.view(NF4Tensor) with {same_shape=}: size={size}, original shape={original_shape}")
+            
 
 @implements(
     [
@@ -376,26 +414,47 @@ def copy_(func, *args, **kwargs):
     copy_in: torch.Tensor = args[0][1]
 
     # Base Case
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+    else:
+        rank = 0
 
-    if same_metadata(original, copy_in):
+    if rank == 0:
+        print(f"DEBUG::copy_ {type(original)} {original.shape} {type(copy_in)} {copy_in.shape}", flush=True)
+    #with torch._C.DisableTorchFunctionSubclass():
+    is_same_metadata = same_metadata(original, copy_in)
+    
+    if is_same_metadata:
+        if rank == 0:
+            print(f"DEBUG::copy_ same_metadata", flush=True)
         original_tensors = original.__tensor_flatten__()[0]
         for tensor_name in original_tensors:
             getattr(original, tensor_name).copy_(getattr(copy_in, tensor_name))
-        return
+        return 
 
     # Convert Non NF4Tensor into NF4 for copy in
     if not isinstance(copy_in, NF4Tensor):
+        if rank == 0:
+            print(f"DEBUG::copy_not NF4Tensor", flush=True)
         copy_in_nf4 = NF4Tensor.from_tensor(
             copy_in.to(original.device), original.block_size, original.scaler_block_size
         )
         return original.copy_(copy_in_nf4)
 
     # Other Tensor is not a NF4Tensor
-    full_precision = copy_in.get_original_weight()
-    same_meta_nf4 = NF4Tensor.from_tensor(
-        full_precision, original.block_size, original.scaler_block_size
-    )
-    return original.copy_(same_meta_nf4)
+    if rank == 0:
+        print(f"DEBUG::copy_metadata mismatch", flush=True)
+ #   full_precision = copy_in.get_original_weight()
+
+    # same_meta_nf4 = NF4Tensor.from_tensor(
+    #     full_precision, original.block_size, original.scaler_block_size
+    # )
+    original_tensors = original.__tensor_flatten__()[0]
+    for tensor_name in original_tensors:
+        getattr(original, tensor_name).copy_(getattr(copy_in, tensor_name))
+    return 
+
+#    return original.copy_(same_meta_nf4)
 
 
 @implements(
@@ -857,6 +916,7 @@ class NF4Tensor(torch.Tensor):
         if not all(allowed_subclasses(t) for t in types):
             return NotImplemented("Up to the next one to handle")
 
+        print(f"nf4 dispatching {func} with {[type(arg) for arg in args]} and {kwargs}")
         if func in NF4_OPS_TABLE:
             return NF4_OPS_TABLE[func](func, args, kwargs)
         raise NotImplementedError(
