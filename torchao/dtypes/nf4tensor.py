@@ -933,7 +933,10 @@ class NF4Tensor(torch.Tensor):
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
             kwargs = {}
-
+        if func.__name__ != "__getitem__":
+            print("\n--------------- NF4Tensor __torch_function__ ----------------\n")
+            print(f"[{func}::{func.__name__}]  \n {len(args)} arg{'s' if len(args) > 1 else ''}: {[type(arg) for arg in args]}\n kwargs: {kwargs}")
+            print("\n--------------------------------------------------------------\n")
         try:
             if func in NF4_TORCH_FUNCTIONS:
                 return NF4_TORCH_FUNCTIONS[func](*args, **kwargs)
