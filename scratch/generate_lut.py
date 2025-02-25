@@ -1,3 +1,6 @@
+import torch
+
+
 def generate_lookup_table(lookup_values):
     """
     Given a list of lookup values (as strings), generate a nested tl.where
@@ -31,6 +34,6 @@ def generate_lookup_table(lookup_values):
     return "y = " + expr
 
 # Example usage:
-lookup_values = ["-2.0", "-1.0", "0.0", "1.0", "2.0", "3.0", "4.0", "5.0"]
+lookup_values = torch.randn(10, dtype=torch.float32).tolist()
 lookup_statement = generate_lookup_table(lookup_values)
 print(lookup_statement)
