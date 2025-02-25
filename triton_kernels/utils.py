@@ -30,10 +30,10 @@ def _get_package_version(package):
 
 # Copied from vLLM: https://github.com/vllm-project/vllm/blob/340e39e387d64160c019bcc553b194f070fa2748/vllm/utils.py#L1857
 def direct_register_custom_op(
-    library_name: str,
+    library: torch.library.Library,
     op_name: str,
     op_func: Callable,
-    mutates_args: List[str],
+    mutates_args: List[str] = None,
     fake_impl: Optional[Callable] = None,
 ):
     """
@@ -49,12 +49,11 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    lib = torch.library.Library(library_name, "FRAGMENT")
-    schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    lib.define(op_name + schema_str)
-    lib.impl(op_name, op_func, "CUDA")
+    schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args or [])
+    library.define(op_name + schema_str)
+    library.impl(op_name, op_func, "CUDA")
     if fake_impl is not None:
-        lib._register_fake(op_name, fake_impl)
+        library._register_fake(op_name, fake_impl)
 
 def create_nf4_param(
     input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True

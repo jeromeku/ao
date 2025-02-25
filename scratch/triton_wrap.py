@@ -1,8 +1,7 @@
 import torch
+import triton
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.library import triton_op, wrap_triton
-
-import triton
 from triton import language as tl
 
 
@@ -79,10 +78,17 @@ def profile_add(fn, num_runs=100):
             fn()
     print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
 
-profile_add(lambda: _add(x, y))
-profile_add(lambda: wrapped_add(x, y))
+# profile_add(lambda: _add(x, y))
+# profile_add(lambda: wrapped_add(x, y))
 
-profile_add(lambda: compiled_add(x, y))
-profile_add(lambda: compiled_wrapped_add(x, y))
+# profile_add(lambda: compiled_add(x, y))
+# profile_add(lambda: compiled_wrapped_add(x, y))
 
-bench_add(compiled=False)
+# bench_add(compiled=False)
+
+from triton_kernels.utils import direct_register_custom_op
+
+library = torch.library.Library("test_lib", "FRAGMENT")
+direct_register_custom_op(library, "add", _add)
+print(dir(torch.ops.test_lib))
+profile_add(lambda: torch.ops.test_lib.add(x, y))
