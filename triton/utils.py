@@ -1,15 +1,18 @@
 import sys
 import textwrap
+from dataclasses import dataclass
 
 import bitsandbytes as bnb
 import torch
 from bitsandbytes.functional import create_dynamic_map, create_normal_map
 
-import triton
-import triton.language as tl
 
+@dataclass
+class LUTKernel:
+    name: str
+    source: str
 
-def create_qparam(
+def create_nf4_param(
     input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True
 ) -> bnb.nn.Params4bit:
     param = bnb.nn.Params4bit(
@@ -42,6 +45,7 @@ NF4_DATA = [
     1.0,
 ]
 
+
 def get_nf4_codebook(use_hardcoded=True, device="cpu", dtype=torch.float32):
     """
     Returns:
@@ -51,43 +55,27 @@ def get_nf4_codebook(use_hardcoded=True, device="cpu", dtype=torch.float32):
         return torch.tensor(NF4_DATA, device=device, dtype=dtype)
     else:
         normal_map = create_normal_map()
-        nf4_map = torch.cat([normal_map[:8], normal_map[-8:]]).to(device=device, dtype=dtype)
+        nf4_map = torch.cat([normal_map[:8], normal_map[-8:]]).to(
+            device=device, dtype=dtype
+        )
         return nf4_map
 
-# def _generate_lookup_table(lookup_values):
-#     """
-#     Given a list of lookup values, generate a nested tl.where
-#     statement for a lookup table. The generated statement will be of the form:
+def get_blockwise_codebook(device="cpu", dtype=torch.float32):
+    """
+    Returns:
+        torch.Tensor: default dynamic blockwise quant map used for compressing absmax when quantizing with bitsandbytes nf4
+        with `compress_statistics=True`.
+    """
+    codebook = create_dynamic_map()
+    return codebook.to(device=device, dtype=dtype)
 
-#       y = tl.where(x < 1, v1, tl.where(x < 2, v2, tl.where(x < 3, v3, ... vN)))
-
-#     where each value corresponds to the threshold condition:
-#       - If x < 1, then use lookup_values[0] (v1)
-#       - Else if x < 2, then use lookup_values[1] (v2)
-#       - ...
-#       - Else use the final value lookup_values[-1] (vN)
-    
-#     Parameters:
-#       lookup_values (list of str): A list of lookup value strings.
-
-#     Returns:
-#       str: A string representing the nested tl.where statement.
-#     """
-#     # Start with the default value (the last value in the list).
-#     expr = lookup_values[-1]
-#     # Build the nested expression from the end toward the beginning.
-#     for i in range(len(lookup_values) - 1, 0, -1):
-#         # For each i, we use threshold i and value lookup_values[i-1].
-#         expr = f"tl.where(x < {i}, {lookup_values[i-1]}, {expr})"
-    
-#     return expr
 
 def _generate_lookup_table(lookup_values):
     """
     Given a list of lookup values, generate a nested, indented tl.where statement.
-    
+
     The generated string will have the form:
-    
+
         y = tl.where(
                 x < 1,
                 v1,
@@ -101,22 +89,23 @@ def _generate_lookup_table(lookup_values):
                     )
                 )
             )
-    
+
     Implements a lookup table by mapping an uint8 array of values to a float32 array of values:
     E.g., if lookup_values = [-1, -.5, 0, .5], then:
     0 -> -1
     1 -> -0.5
     2 -> 0
     3 -> 0.5
-    
+
     Parameters:
       lookup_values (list): List of lookup values (as strings or numbers).
-      
+
     Returns:
       str: A multi-line, indented string of nested tl.where statements.
-    
+
     Assumption is that lookup_values is a sorted list of floats and that the values to be mapped are uint8.
     """
+
     def rec(i, N, indent_level):
         indent = " " * (4 * indent_level)
         # Base case: when i == N, return the fallback value (last element).
@@ -129,19 +118,12 @@ def _generate_lookup_table(lookup_values):
             #   false branch: nested tl.where (for i+1)
             s = indent + "tl.where(\n"
             s += indent + "    x < " + str(i) + ",\n"
-            s += indent + "    " + str(lookup_values[i-1]) + ",\n"
+            s += indent + "    " + str(lookup_values[i - 1]) + ",\n"
             s += rec(i + 1, N, indent_level + 1) + "\n"
             s += indent + ")"
             return s
 
     return rec(1, len(lookup_values), 0)
-from dataclasses import dataclass
-
-
-@dataclass
-class LUTKernel:
-    name: str
-    source: str
 
 def _generate_triton_lut_kernel(name, expr):
     """
@@ -160,13 +142,14 @@ def _generate_triton_lut_kernel(name, expr):
     # Remove leading whitespace from the template.
     _template = textwrap.dedent(TRITON_LUT_KERNEL_TEMPLATE)
     kernel = _template.format(name=name, expr=expr)
-    
+
     return LUTKernel(name=name, source=kernel)
 
-def generate_triton_nf4_lut_kernel(use_hardcoded=True, dtype=torch.float32, save_path=None, return_map=False):
-    nf4_map = get_nf4_codebook(use_hardcoded=use_hardcoded, dtype=dtype)
-    nf4_lut_expr = _generate_lookup_table(nf4_map.tolist())
-    triton_kernel = _generate_triton_lut_kernel("nf4_lut_device_kernel", nf4_lut_expr)
+
+
+def generate_triton_lut_kernel(codebook, kernel_name, save_path=None, return_map=False):
+    lut_expr = _generate_lookup_table(codebook.tolist())
+    triton_kernel = _generate_triton_lut_kernel(kernel_name, lut_expr)
     if save_path:
         if isinstance(save_path, str):
             with open(save_path, "w") as f:
@@ -174,19 +157,32 @@ def generate_triton_nf4_lut_kernel(use_hardcoded=True, dtype=torch.float32, save
         else:
             save_path.write(triton_kernel.source)
     if return_map:
-        return triton_kernel, nf4_map
+        return triton_kernel, codebook
     else:
         return triton_kernel
+
+
+def generate_triton_nf4_lut_kernel(
+    use_hardcoded=True, dtype=torch.float32, save_path=None, return_map=False
+):
+    nf4_map = get_nf4_codebook(use_hardcoded=use_hardcoded, dtype=dtype)
+    return generate_triton_lut_kernel(nf4_map, "nf4_lut_device_kernel", save_path, return_map)
+
+def generate_triton_blockwise_lut_kernel(save_path=None, return_map=False):
+    codebook = get_blockwise_codebook()
+    return generate_triton_lut_kernel(codebook, "blockwise_lut_device_kernel", save_path, return_map)
 
 def _test_nf4_lut():
     nf4_map_functional = get_nf4_codebook(use_hardcoded=False)
     nf4_map_hardcoded = get_nf4_codebook(use_hardcoded=True)
-    assert torch.equal(nf4_map_functional, nf4_map_hardcoded), "Functional and hardcoded NF4 maps do not match"
+    assert torch.equal(nf4_map_functional, nf4_map_hardcoded), (
+        "Functional and hardcoded NF4 maps do not match"
+    )
 
 def _load_triton_kernel(kernel_path, kernel_name):
     import importlib.util
     from pathlib import Path
-    
+
     kernel_path = Path(kernel_path)
     sys.path.insert(0, str(kernel_path.parent))
     spec = importlib.util.spec_from_file_location(kernel_path.stem, kernel_path)
@@ -195,10 +191,11 @@ def _load_triton_kernel(kernel_path, kernel_name):
     kernel = getattr(mod, kernel_name)
     return kernel
 
-def _test_nf4_lut_kernel():
+
+def _test_lut_kernel(quant_type):
     import os
     from tempfile import TemporaryDirectory
-    
+
     TEST_KERNEL_TEMPLATE = """
     @triton.jit
     def test_kernel(_x, _y, N: tl.constexpr):
@@ -209,10 +206,21 @@ def _test_nf4_lut_kernel():
 """
 
     _template = textwrap.dedent(TEST_KERNEL_TEMPLATE)
+
+    if quant_type == "nf4":
+        kernel_generator = generate_triton_nf4_lut_kernel
+        codebook = get_nf4_codebook()
+        assert len(codebook) == 16, "NF4 codebook is not the expected size"
+    elif quant_type == "blockwise":
+        kernel_generator = generate_triton_blockwise_lut_kernel
+        codebook = get_blockwise_codebook()
+        assert len(codebook) == 256, "Blockwise codebook is not the expected size"
+    else:
+        raise ValueError(f"Unknown quant_type: {quant_type}")
     
     with TemporaryDirectory() as tempdir:
-        save_path = os.path.join(tempdir, "_generated_nf4_lut.py")
-        generated_kernel, nf4_map = generate_triton_nf4_lut_kernel(use_hardcoded=True, return_map=True)
+        save_path = os.path.join(tempdir, f"_generated_{quant_type}_lut.py")
+        generated_kernel = kernel_generator()
         test_kernel = _template.format(device_kernel_name=generated_kernel.name)
         test_source = "\n".join([generated_kernel.source, test_kernel])
 
@@ -220,20 +228,25 @@ def _test_nf4_lut_kernel():
             f.write(test_source)
 
         test_kernel = _load_triton_kernel(save_path, "test_kernel")
-        
-        
+
         N = 256
-        nf4_min, nf4_max = 0, len(nf4_map) - 1
-        assert nf4_min == 0 and nf4_max == 2 ** 4 - 1, "NF4 map is not the expected size"
-        
-        x = torch.randint(nf4_min, nf4_max, (N,), dtype=torch.uint8, device="cuda")
+        _max = 2 ** 4 - 1 if quant_type == "nf4" else 2 ** 8 - 1
+
+        x = torch.randint(0, _max, (N,), dtype=torch.uint8, device="cuda")
         y = torch.empty(N, dtype=torch.float32, device="cuda")
-        
+
         test_kernel[(1,)](x, y, N)
-        ref = nf4_map[x.cpu().tolist()]
-        
-        assert torch.equal(ref, y.cpu()), f"Triton kernel and reference lookup do not match, {sum(ref != y.cpu())} mismatches"
+        ref = codebook[x.cpu().tolist()]
+
+        if not torch.equal(ref, y.cpu()):
+            print(f"\u2718 {quant_type} LUT kernel test failed")
+        else:
+            print(f"\u2713 {quant_type} LUT kernel test passed")
+
+
 if __name__ == "__main__":
     torch.set_printoptions(precision=8)
-#    _test_nf4_lut()
-    _test_nf4_lut_kernel()
+    _test_lut_kernel("nf4")
+    
+    # SyntaxError: too many nested parentheses
+    #_test_lut_kernel("blockwise")
