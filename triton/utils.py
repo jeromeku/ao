@@ -131,7 +131,13 @@ def _generate_lookup_table(lookup_values):
             return s
 
     return rec(1, len(lookup_values), 0)
+from dataclasses import dataclass
 
+
+@dataclass
+class LUTKernel:
+    name: str
+    source: str
 
 def _generate_triton_lut_kernel(name, expr):
     """
@@ -144,28 +150,56 @@ def _generate_triton_lut_kernel(name, expr):
     import triton.language as tl
 
     @triton.jit
-    def {name}_lut_device_kernel(x):
+    def {name}(x):
         return {expr}
     """
     # Remove leading whitespace from the template.
     _template = textwrap.dedent(TRITON_LUT_KERNEL_TEMPLATE)
     kernel = _template.format(name=name, expr=expr)
-    return kernel
+    
+    return LUTKernel(name=name, source=kernel)
 
 def generate_triton_nf4_lut_kernel(use_hardcoded=True, dtype=torch.float32, save_path=None):
     nf4_map = get_nf4_codebook(use_hardcoded=use_hardcoded, dtype=dtype)
     nf4_lut_expr = _generate_lookup_table(nf4_map.tolist())
-    triton_kernel = _generate_triton_lut_kernel("nf4", nf4_lut_expr)
+    triton_kernel = _generate_triton_lut_kernel("nf4_lut_device_kernel", nf4_lut_expr)
     if save_path:
-        with open(save_path, "w") as f:
-            f.write(triton_kernel)
+        if isinstance(save_path, str):
+            with open(save_path, "w") as f:
+                f.write(triton_kernel.source)
+        else:
+            save_path.write(triton_kernel.source)
     return triton_kernel
 
-if __name__ == "__main__":
-    torch.set_printoptions(precision=8)
-
+def _test_nf4_lut():
     nf4_map_functional = get_nf4_codebook(use_hardcoded=False)
     nf4_map_hardcoded = get_nf4_codebook(use_hardcoded=True)
     assert torch.equal(nf4_map_functional, nf4_map_hardcoded), "Functional and hardcoded NF4 maps do not match"
 
-    print(generate_triton_nf4_lut_kernel(use_hardcoded=True, save_path="_generated_nf4_lut.py"))
+def load_triton_kernel(kernel_path, kernel_name):
+    import importlib.util
+    import sys
+    from pathlib import Path
+    
+    kernel_path = Path(kernel_path)
+    sys.path.insert(0, str(kernel_path.parent))
+    spec = importlib.util.spec_from_file_location(kernel_path.stem, kernel_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    kernel = getattr(mod, kernel_name)
+    return kernel
+
+def _test_nf4_lut_kernel():
+    import os
+    from tempfile import TemporaryDirectory
+
+    
+    with TemporaryDirectory() as tempdir:
+        save_path = os.path.join(tempdir, "_generated_nf4_lut.py")
+        generated_kernel: LUTKernel = generate_triton_nf4_lut_kernel(use_hardcoded=True, save_path=save_path)
+        kernel = load_triton_kernel(save_path, generated_kernel.name)
+        print(kernel)
+if __name__ == "__main__":
+    torch.set_printoptions(precision=8)
+#    _test_nf4_lut()
+    _test_nf4_lut_kernel()
