@@ -48,20 +48,41 @@ assert torch.allclose(z, x + y), "compiled_add failed"
 z = compiled_wrapped_add(x, y)
 assert torch.allclose(z, x + y), "compiled_wrapped_add failed"
 
-print("add graph module")
-gm: torch.fx.GraphModule = make_fx(_add)(x, y)
-gm.print_readable()
-print("wrapped add graph module")
-gm_wrapped: torch.fx.GraphModule = make_fx(wrapped_add)(x, y)
-gm_wrapped.print_readable()
+def print_graph_module(f, *args):
+    gm: torch.fx.GraphModule = make_fx(f)(*args)
+    gm.print_readable()
 
-from triton.testing import do_bench
+#print_graph_module(_add, x, y)
+#print_graph_module(wrapped_add, x, y)
 
-add_t = do_bench(lambda: _add(x, y))
-wrapped_add_t = do_bench(lambda: wrapped_add(x, y))
-print(f"add_t: {add_t}")
-print(f"wrapped_add_t: {wrapped_add_t}")
-compiled_add_t = do_bench(lambda: compiled_add(x, y))
-compiled_wrapped_add_t = do_bench(lambda: compiled_wrapped_add(x, y))
-print(f"compiled_add_t: {compiled_add_t}")
-print(f"compiled_wrapped_add_t: {compiled_wrapped_add_t}")
+
+
+def bench_add(compiled=False):
+    from triton.testing import do_bench
+
+    add_t = do_bench(lambda: _add(x, y))
+    wrapped_add_t = do_bench(lambda: wrapped_add(x, y))
+
+    print(f"add_t: {add_t}")
+    print(f"wrapped_add_t: {wrapped_add_t}")
+
+    if compiled:
+        compiled_add_t = do_bench(lambda: compiled_add(x, y))
+        compiled_wrapped_add_t = do_bench(lambda: compiled_wrapped_add(x, y))
+        print(f"compiled_add_t: {compiled_add_t}")
+        print(f"compiled_wrapped_add_t: {compiled_wrapped_add_t}")
+
+
+def profile_add(fn, num_runs=100):
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
+        for _ in range(num_runs):
+            fn()
+    print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
+
+profile_add(lambda: _add(x, y))
+profile_add(lambda: wrapped_add(x, y))
+
+profile_add(lambda: compiled_add(x, y))
+profile_add(lambda: compiled_wrapped_add(x, y))
+
+bench_add(compiled=False)
