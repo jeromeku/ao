@@ -67,3 +67,4 @@ chunked_absmax = nf4_meta.quantized_absmax.reshape(-1, blocks_per_row).chunk(num
 print(chunked_absmax[0].shape)
 print(absmax_to_split[0].shape)
 assert torch.equal(chunked_absmax[0], absmax_to_split[0])
+print(nf4_meta.absmax_scale_factors.shape)
