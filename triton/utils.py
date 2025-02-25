@@ -28,7 +28,7 @@ def _get_package_version(package):
         print("Invalid version format.")
 
 
-# Copied from vLLM
+# Copied from vLLM: https://github.com/vllm-project/vllm/blob/340e39e387d64160c019bcc553b194f070fa2748/vllm/utils.py#L1857
 def direct_register_custom_op(
     library_name: str,
     op_name: str,
