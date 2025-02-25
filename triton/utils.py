@@ -7,10 +7,25 @@ import torch
 from bitsandbytes.functional import create_dynamic_map, create_normal_map
 
 
-@dataclass
-class LUTKernel:
-    name: str
-    source: str
+def _get_package_version(package):
+    from packaging import version
+
+    _version = getattr(package, "__version__", None)
+    if _version is None:
+        raise ValueError(f"Package {package} does not have a __version__ attribute")
+
+    ver = version.parse(_version)
+
+    if isinstance(ver, version.Version):
+        major = ver.major
+        minor = ver.minor
+        return major, minor
+    elif isinstance(ver, version.LegacyVersion):
+        # Handle legacy versions (non-PEP 440 compliant) if necessary.
+        print("Legacy version format detected - further parsing may be required.")
+    else:
+        print("Invalid version format.")
+
 
 def create_nf4_param(
     input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True
@@ -60,6 +75,7 @@ def get_nf4_codebook(use_hardcoded=True, device="cpu", dtype=torch.float32):
         )
         return nf4_map
 
+
 def get_blockwise_codebook(device="cpu", dtype=torch.float32):
     """
     Returns:
@@ -68,6 +84,20 @@ def get_blockwise_codebook(device="cpu", dtype=torch.float32):
     """
     codebook = create_dynamic_map()
     return codebook.to(device=device, dtype=dtype)
+
+
+# --- Utility Functions for generating NF4 lookup table device kernel --- #
+
+
+@dataclass
+
+class LUTKernel:
+    """
+    A dataclass for storing a generated triton kernel.
+    """
+
+    name: str
+    source: str
 
 
 def _generate_lookup_table(lookup_values):
@@ -125,6 +155,7 @@ def _generate_lookup_table(lookup_values):
 
     return rec(1, len(lookup_values), 0)
 
+
 def _generate_triton_lut_kernel(name, expr):
     """
     Given a name and an expression, generate a triton kernel that implements a lookup table.
@@ -146,7 +177,6 @@ def _generate_triton_lut_kernel(name, expr):
     return LUTKernel(name=name, source=kernel)
 
 
-
 def generate_triton_lut_kernel(codebook, kernel_name, save_path=None, return_map=False):
     lut_expr = _generate_lookup_table(codebook.tolist())
     triton_kernel = _generate_triton_lut_kernel(kernel_name, lut_expr)
@@ -165,12 +195,42 @@ def generate_triton_lut_kernel(codebook, kernel_name, save_path=None, return_map
 def generate_triton_nf4_lut_kernel(
     use_hardcoded=True, dtype=torch.float32, save_path=None, return_map=False
 ):
-    nf4_map = get_nf4_codebook(use_hardcoded=use_hardcoded, dtype=dtype)
-    return generate_triton_lut_kernel(nf4_map, "nf4_lut_device_kernel", save_path, return_map)
+    """
+    Generate a triton (device) kernel that implements a lookup table for nf4 quantization to work
+    around triton's lack of support for static arrays.
 
-def generate_triton_blockwise_lut_kernel(save_path=None, return_map=False):
+    Args:
+        use_hardcoded (bool): Whether to use the hardcoded nf4 codebook.
+        dtype (torch.dtype): The dtype of the codebook.
+        save_path (str): The path to save the generated kernel.
+        return_map (bool): Whether to return the codebook.
+
+    Returns:
+        LUTKernel: The generated triton kernel.
+    """
+    nf4_map = get_nf4_codebook(use_hardcoded=use_hardcoded, dtype=dtype)
+    return generate_triton_lut_kernel(
+        nf4_map, "nf4_lut_device_kernel", save_path, return_map
+    )
+
+
+def _generate_triton_blockwise_lut_kernel(save_path=None, return_map=False):
+    """
+    Generate a triton (device) kernel that implements a lookup table for blockwise quantization used when
+    compressing absmax with bitsandbytes nf4 with `compress_statistics=True`.
+
+    NOT USED: The device kernel is implemented as a series of nested tl.where statements to map input values to codebook values
+    since triton does not support static arrays.  However, since the nested codebook uses 256 values, results in syntax error due to
+    too many nested parentheses.
+    """
     codebook = get_blockwise_codebook()
-    return generate_triton_lut_kernel(codebook, "blockwise_lut_device_kernel", save_path, return_map)
+    return generate_triton_lut_kernel(
+        codebook, "blockwise_lut_device_kernel", save_path, return_map
+    )
+
+
+### --- TESTS --- ###
+
 
 def _test_nf4_lut():
     nf4_map_functional = get_nf4_codebook(use_hardcoded=False)
@@ -178,6 +238,7 @@ def _test_nf4_lut():
     assert torch.equal(nf4_map_functional, nf4_map_hardcoded), (
         "Functional and hardcoded NF4 maps do not match"
     )
+
 
 def _load_triton_kernel(kernel_path, kernel_name):
     import importlib.util
@@ -217,7 +278,7 @@ def _test_lut_kernel(quant_type):
         assert len(codebook) == 256, "Blockwise codebook is not the expected size"
     else:
         raise ValueError(f"Unknown quant_type: {quant_type}")
-    
+
     with TemporaryDirectory() as tempdir:
         save_path = os.path.join(tempdir, f"_generated_{quant_type}_lut.py")
         generated_kernel = kernel_generator()
@@ -230,7 +291,7 @@ def _test_lut_kernel(quant_type):
         test_kernel = _load_triton_kernel(save_path, "test_kernel")
 
         N = 256
-        _max = 2 ** 4 - 1 if quant_type == "nf4" else 2 ** 8 - 1
+        _max = 2**4 - 1 if quant_type == "nf4" else 2**8 - 1
 
         x = torch.randint(0, _max, (N,), dtype=torch.uint8, device="cuda")
         y = torch.empty(N, dtype=torch.float32, device="cuda")
@@ -246,7 +307,10 @@ def _test_lut_kernel(quant_type):
 
 if __name__ == "__main__":
     torch.set_printoptions(precision=8)
-    _test_lut_kernel("nf4")
-    
+    # _test_nf4_lut()
+    # _test_lut_kernel("nf4")
+
+    print(_get_package_version(torch))
     # SyntaxError: too many nested parentheses
-    #_test_lut_kernel("blockwise")
+    # _test_lut_kernel("blockwise")
+
