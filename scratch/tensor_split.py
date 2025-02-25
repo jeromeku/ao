@@ -68,3 +68,12 @@ print(chunked_absmax[0].shape)
 print(absmax_to_split[0].shape)
 assert torch.equal(chunked_absmax[0], absmax_to_split[0])
 print(nf4_meta.absmax_scale_factors.shape)
+
+# As long blocks_per_row <= nested_block_size, we don't need to split the absmax scale factors when chunking along dim 1 since
+# all ranks will have the same absmax scale factors.
+
+# E.g., if block_per_row = 16, then every group of 16 rows will share the same absmax scale factor.
+# Splitting across dim 1 won't affect the absmax scale factors.
+
+# If splitting along dim 0, then we need to chunk the absmax scale factors along dim 0.
+# This can be done by chunking contiguous segments of absmax scale factors along single dimension.
