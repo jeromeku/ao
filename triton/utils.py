@@ -1,6 +1,7 @@
 import sys
 import textwrap
 from dataclasses import dataclass
+from typing import Callable, List, Optional
 
 import bitsandbytes as bnb
 import torch
@@ -26,6 +27,34 @@ def _get_package_version(package):
     else:
         print("Invalid version format.")
 
+
+# Copied from vLLM
+def direct_register_custom_op(
+    library_name: str,
+    op_name: str,
+    op_func: Callable,
+    mutates_args: List[str],
+    fake_impl: Optional[Callable] = None,
+):
+    """
+    `torch.library.custom_op` can have significant overhead because it
+    needs to consider complicated dispatching logic. This function
+    directly registers a custom op and dispatches it to the CUDA backend.
+    See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
+    for more details.
+    By default, the custom op is registered to the vLLM library. If you
+    want to register it to a different library, you can pass the library
+    object to the `target_lib` argument.
+    IMPORTANT: the lifetime of the operator is tied to the lifetime of the
+    library object. If you want to bind the operator to a different library,
+    make sure the library object is alive when the operator is used.
+    """
+    lib = torch.library.Library(library_name, "FRAGMENT")
+    schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
+    lib.define(op_name + schema_str)
+    lib.impl(op_name, op_func, "CUDA")
+    if fake_impl is not None:
+        lib._register_fake(op_name, fake_impl)
 
 def create_nf4_param(
     input_weight, quant_type="nf4", quant_storage=torch.uint8, compress_statistics=True
@@ -273,7 +302,7 @@ def _test_lut_kernel(quant_type):
         codebook = get_nf4_codebook()
         assert len(codebook) == 16, "NF4 codebook is not the expected size"
     elif quant_type == "blockwise":
-        kernel_generator = generate_triton_blockwise_lut_kernel
+        kernel_generator = _generate_triton_blockwise_lut_kernel
         codebook = get_blockwise_codebook()
         assert len(codebook) == 256, "Blockwise codebook is not the expected size"
     else:
