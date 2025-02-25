@@ -1,8 +1,12 @@
+import sys
 import textwrap
 
 import bitsandbytes as bnb
 import torch
 from bitsandbytes.functional import create_dynamic_map, create_normal_map
+
+import triton
+import triton.language as tl
 
 
 def create_qparam(
@@ -159,7 +163,7 @@ def _generate_triton_lut_kernel(name, expr):
     
     return LUTKernel(name=name, source=kernel)
 
-def generate_triton_nf4_lut_kernel(use_hardcoded=True, dtype=torch.float32, save_path=None):
+def generate_triton_nf4_lut_kernel(use_hardcoded=True, dtype=torch.float32, save_path=None, return_map=False):
     nf4_map = get_nf4_codebook(use_hardcoded=use_hardcoded, dtype=dtype)
     nf4_lut_expr = _generate_lookup_table(nf4_map.tolist())
     triton_kernel = _generate_triton_lut_kernel("nf4_lut_device_kernel", nf4_lut_expr)
@@ -169,16 +173,18 @@ def generate_triton_nf4_lut_kernel(use_hardcoded=True, dtype=torch.float32, save
                 f.write(triton_kernel.source)
         else:
             save_path.write(triton_kernel.source)
-    return triton_kernel
+    if return_map:
+        return triton_kernel, nf4_map
+    else:
+        return triton_kernel
 
 def _test_nf4_lut():
     nf4_map_functional = get_nf4_codebook(use_hardcoded=False)
     nf4_map_hardcoded = get_nf4_codebook(use_hardcoded=True)
     assert torch.equal(nf4_map_functional, nf4_map_hardcoded), "Functional and hardcoded NF4 maps do not match"
 
-def load_triton_kernel(kernel_path, kernel_name):
+def _load_triton_kernel(kernel_path, kernel_name):
     import importlib.util
-    import sys
     from pathlib import Path
     
     kernel_path = Path(kernel_path)
@@ -192,13 +198,41 @@ def load_triton_kernel(kernel_path, kernel_name):
 def _test_nf4_lut_kernel():
     import os
     from tempfile import TemporaryDirectory
+    
+    TEST_KERNEL_TEMPLATE = """
+    @triton.jit
+    def test_kernel(_x, _y, N: tl.constexpr):
+        load_idx = tl.arange(0, N)
+        x = tl.load(_x + load_idx)
+        y = {device_kernel_name}(x)
+        tl.store(_y + load_idx, y)
+"""
 
+    _template = textwrap.dedent(TEST_KERNEL_TEMPLATE)
     
     with TemporaryDirectory() as tempdir:
         save_path = os.path.join(tempdir, "_generated_nf4_lut.py")
-        generated_kernel: LUTKernel = generate_triton_nf4_lut_kernel(use_hardcoded=True, save_path=save_path)
-        kernel = load_triton_kernel(save_path, generated_kernel.name)
-        print(kernel)
+        generated_kernel, nf4_map = generate_triton_nf4_lut_kernel(use_hardcoded=True, return_map=True)
+        test_kernel = _template.format(device_kernel_name=generated_kernel.name)
+        test_source = "\n".join([generated_kernel.source, test_kernel])
+
+        with open(save_path, "w") as f:
+            f.write(test_source)
+
+        test_kernel = _load_triton_kernel(save_path, "test_kernel")
+        
+        
+        N = 256
+        nf4_min, nf4_max = 0, len(nf4_map) - 1
+        assert nf4_min == 0 and nf4_max == 2 ** 4 - 1, "NF4 map is not the expected size"
+        
+        x = torch.randint(nf4_min, nf4_max, (N,), dtype=torch.uint8, device="cuda")
+        y = torch.empty(N, dtype=torch.float32, device="cuda")
+        
+        test_kernel[(1,)](x, y, N)
+        ref = nf4_map[x.cpu().tolist()]
+        
+        assert torch.equal(ref, y.cpu()), f"Triton kernel and reference lookup do not match, {sum(ref != y.cpu())} mismatches"
 if __name__ == "__main__":
     torch.set_printoptions(precision=8)
 #    _test_nf4_lut()
