@@ -75,5 +75,7 @@ print(nf4_meta.absmax_scale_factors.shape)
 # E.g., if block_per_row = 16, then every group of 16 rows will share the same absmax scale factor.
 # Splitting across dim 1 won't affect the absmax scale factors.
 
+# If block_per_row > nested_block_size, then we need to repeat what we did for the quantized absmax.
+# reshape as (-1, nested_blocks_per_row) and chunk along dim 1, where nested_blocks_per_row = blocks_per_row // nested_block_size
 # If splitting along dim 0, then we need to chunk the absmax scale factors along dim 0.
 # This can be done by chunking contiguous segments of absmax scale factors along single dimension.
