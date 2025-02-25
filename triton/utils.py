@@ -228,6 +228,8 @@ def generate_triton_nf4_lut_kernel(
     Generate a triton (device) kernel that implements a lookup table for nf4 quantization to work
     around triton's lack of support for static arrays.
 
+    Meant to replicate the tree search per the original implementation: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/csrc/kernels.cu#L116.
+
     Args:
         use_hardcoded (bool): Whether to use the hardcoded nf4 codebook.
         dtype (torch.dtype): The dtype of the codebook.
@@ -251,6 +253,9 @@ def _generate_triton_blockwise_lut_kernel(save_path=None, return_map=False):
     NOT USED: The device kernel is implemented as a series of nested tl.where statements to map input values to codebook values
     since triton does not support static arrays.  However, since the nested codebook uses 256 values, results in syntax error due to
     too many nested parentheses.
+
+    Also, in the original implementation, the codebooks is passed to the kernel as an array: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/csrc/kernels.cu#L636-L641
+    wherease for nf4 dequant, a tree-like lookup is used: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/csrc/kernels.cu#L116
     """
     codebook = get_blockwise_codebook()
     return generate_triton_lut_kernel(
