@@ -513,6 +513,7 @@ def get_extensions():
     cuda_sources = list(
         glob.glob(os.path.join(extensions_cuda_dir, "**/*.cu"), recursive=True)
     )
+    print(f"CUDA SOURCES: {cuda_sources}")
 
     # Define ROCm source directories
     rocm_source_dirs = [
@@ -657,7 +658,8 @@ def get_extensions():
                 extra_link_args=extra_link_args,
             )
         )
-
+    
+    mx_extensions = []
     # Add the mxfp8 casting CUDA extension
     if use_cuda:
         mxfp8_sources = [
@@ -669,7 +671,7 @@ def get_extensions():
         mxfp8_src_files_exist = all(os.path.exists(f) for f in mxfp8_sources)
         if mxfp8_src_files_exist and build_for_sm100a:
             print("Building mxfp8_cuda extension")
-            ext_modules.append(
+            mx_extensions.append(
                 CUDAExtension(
                     name="torchao.prototype.mxfp8_cuda",
                     sources=mxfp8_sources,
@@ -687,27 +689,26 @@ def get_extensions():
                 ),
             )
 
-    # Only build the cutlass_90a extension if sm90a is in the architecture flags
-    if (
-        cutlass_90a_sources is not None
-        and len(cutlass_90a_sources) > 0
-        and build_for_sm90a
-    ):
-        cutlass_90a_extra_compile_args = copy.deepcopy(extra_compile_args)
-        # Only use sm90a architecture for these sources, ignoring other flags
-        cutlass_90a_extra_compile_args["nvcc"].append(
-            "-gencode=arch=compute_90a,code=sm_90a"
-        )
-        ext_modules.append(
-            extension(
-                "torchao._C_cutlass_90a",
-                cutlass_90a_sources,
-                py_limited_api=True,
-                extra_compile_args=cutlass_90a_extra_compile_args,
-                extra_link_args=extra_link_args,
-            )
-        )
-
+    # # Only build the cutlass_90a extension if sm90a is in the architecture flags
+    # if (
+    #     cutlass_90a_sources is not None
+    #     and len(cutlass_90a_sources) > 0
+    #     and build_for_sm90a
+    # ):
+    #     cutlass_90a_extra_compile_args = copy.deepcopy(extra_compile_args)
+    #     # Only use sm90a architecture for these sources, ignoring other flags
+    #     cutlass_90a_extra_compile_args["nvcc"].append(
+    #         "-gencode=arch=compute_90a,code=sm_90a"
+    #     )
+    #     ext_modules.append(
+    #         extension(
+    #             "torchao._C_cutlass_90a",
+    #             cutlass_90a_sources,
+    #             py_limited_api=True,
+    #             extra_compile_args=cutlass_90a_extra_compile_args,
+    #             extra_link_args=extra_link_args,
+    #         )
+    #     )
     # Only build the cutlass_100a extension if sm100a is in the architecture flags
     if (
         cutlass_100a_sources is not None
@@ -719,7 +720,7 @@ def get_extensions():
         cutlass_100a_extra_compile_args["nvcc"].append(
             "-gencode=arch=compute_100a,code=sm_100a"
         )
-        ext_modules.append(
+        mx_extensions.append(
             extension(
                 "torchao._C_cutlass_100a",
                 cutlass_100a_sources,
@@ -729,38 +730,9 @@ def get_extensions():
             )
         )
 
-    # Build CMakeLists from /torchao/csrc/cpu - additional options become available : TORCHAO_BUILD_CPU_AARCH64, TORCHAO_BUILD_KLEIDIAI, TORCHAO_BUILD_MPS_OPS, TORCHAO_PARALLEL_BACKEND
-    if build_macos_arm_auto or os.getenv("BUILD_TORCHAO_EXPERIMENTAL") == "1":
-        build_options = BuildOptions()
+    print(mx_extensions)
 
-        def bool_to_on_off(value):
-            return "ON" if value else "OFF"
-
-        from distutils.sysconfig import get_python_lib
-
-        torch_dir = get_python_lib() + "/torch/share/cmake/Torch"
-
-        ext_modules.append(
-            CMakeExtension(
-                "torchao._C_cpu_shared_kernels_aten",
-                cmake_lists_dir="torchao/csrc/cpu",
-                cmake_args=(
-                    [
-                        f"-DCMAKE_BUILD_TYPE={'Debug' if use_debug_mode() else 'Release'}",
-                        f"-DTORCHAO_BUILD_CPU_AARCH64={bool_to_on_off(build_options.build_cpu_aarch64)}",
-                        f"-DTORCHAO_BUILD_KLEIDIAI={bool_to_on_off(build_options.build_kleidi_ai)}",
-                        f"-DTORCHAO_ENABLE_ARM_NEON_DOT={bool_to_on_off(build_options.enable_arm_neon_dot)}",
-                        f"-DTORCHAO_ENABLE_ARM_I8MM={bool_to_on_off(build_options.enable_arm_i8mm)}",
-                        f"-DTORCHAO_PARALLEL_BACKEND={build_options.parallel_backend}",
-                        "-DTORCHAO_BUILD_TESTS=OFF",
-                        "-DTORCHAO_BUILD_BENCHMARKS=OFF",
-                        "-DTorch_DIR=" + torch_dir,
-                    ]
-                ),
-            )
-        )
-
-    return ext_modules
+    return mx_extensions
 
 
 # Only check submodules if we're going to build C++ extensions
